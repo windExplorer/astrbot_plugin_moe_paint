@@ -1,0 +1,124 @@
+{
+    "1": {
+        "inputs": {
+            "clip_name": "qwen_3_06b_base.safetensors",
+            "type": "qwen_image",
+            "device": "default"
+        },
+        "class_type": "CLIPLoader",
+        "_meta": {
+            "title": "加载CLIP"
+        }
+    },
+    "2": {
+        "inputs": {
+            "vae_name": "qwen_image_vae.safetensors"
+        },
+        "class_type": "VAELoader",
+        "_meta": {
+            "title": "加载VAE"
+        }
+    },
+    "3": {
+        "inputs": {
+            "text": "1girl",
+            "clip": ["1", 0]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "正向文本编码"
+        }
+    },
+    "4": {
+        "inputs": {
+            "text": "worst quality, low quality, normal quality, bad anatomy, bad hands, extra digits, fewer digits, missing fingers, extra fingers, mutated hands, poorly drawn face, blurry, watermark, text, logo, signature, jpeg artifacts, ugly, deformed",
+            "clip": ["1", 0]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "负向文本编码"
+        }
+    },
+    "5": {
+        "inputs": {
+            "width": 1216,
+            "height": 832,
+            "batch_size": 1
+        },
+        "class_type": "EmptyLatentImage",
+        "_meta": {
+            "title": "空Latent图像"
+        }
+    },
+    "6": {
+        "inputs": {
+            "seed": 982540017870342919,
+            "steps": 12,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": ["9", 0],
+            "positive": ["3", 0],
+            "negative": ["4", 0],
+            "latent_image": ["5", 0]
+        },
+        "class_type": "KSampler",
+        "_meta": {
+            "title": "K采样器"
+        }
+    },
+    "7": {
+        "inputs": {
+            "samples": ["6", 0],
+            "vae": ["2", 0]
+        },
+        "class_type": "VAEDecode",
+        "_meta": {
+            "title": "VAE解码"
+        }
+    },
+    "8": {
+        "inputs": {
+            "filename_prefix": "moe_paint",
+            "filename_keys": "seed, %F%H%M%S",
+            "foldername_prefix": "",
+            "foldername_keys": "moe_paint/",
+            "delimiter": "-",
+            "save_job_data": "disabled",
+            "job_data_per_image": false,
+            "job_custom_text": "",
+            "save_metadata": false,
+            "counter_digits": 4,
+            "counter_position": "last",
+            "one_counter_per_folder": true,
+            "image_preview": true,
+            "output_ext": ".png",
+            "quality": 99,
+            "images": ["10", 0]
+        },
+        "class_type": "SaveImageExtended",
+        "_meta": {
+            "title": "保存图片"
+        }
+    },
+    "9": {
+        "inputs": {
+            "unet_name": "anima-turbo-v1.0.safetensors",
+            "weight_dtype": "default"
+        },
+        "class_type": "UNETLoader",
+        "_meta": {
+            "title": "UNet加载器"
+        }
+    },
+    "10": {
+        "inputs": {
+            "anything": ["7", 0]
+        },
+        "class_type": "easy cleanGpuUsed",
+        "_meta": {
+            "title": "清理显存占用"
+        }
+    }
+}
