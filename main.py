@@ -651,4 +651,17 @@ class MoePaintPlugin(Star):
         scfg = self._schedule_cfg()
         if str(scfg.get("mode") or "interval") == "daily":
             return f"每日 {scfg.get('daily_times')}"
-        return f"每 {scfg.get('interval_hours')} 小时 ±{scfg.get('jitter_minutes')} 分钟"
+        try:
+            minutes = int(scfg.get("interval_minutes") or 0)
+        except (TypeError, ValueError):
+            minutes = 0
+        if minutes <= 0 and scfg.get("interval_hours") is not None:
+            # 旧配置键兼容（v0.1.1 及更早的 interval_hours，小时）
+            try:
+                minutes = int(float(scfg.get("interval_hours")) * 60)
+            except (TypeError, ValueError):
+                minutes = 0
+        desc = f"每 {minutes or 360} 分钟"
+        if minutes and minutes % 60 == 0:
+            desc = f"每 {minutes // 60} 小时"
+        return f"{desc} ±{scfg.get('jitter_minutes')} 分钟"

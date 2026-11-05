@@ -4,7 +4,7 @@ uv run --no-project python tests/test_scheduler.py（退出码即结论）
 
 import random
 import sys
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 
 from _loader import load
 
@@ -49,23 +49,26 @@ now9 = datetime(2026, 11, 6, 9, 0)
 check("daily_next_strict", scheduler.next_daily_slot([(9, 30), (20, 0)], now9) == datetime(2026, 11, 6, 9, 30))
 check("daily_next_empty", scheduler.next_daily_slot([], now10) == datetime(2026, 11, 7, 10, 0))
 
-# ---------- interval ----------
+# ---------- interval（分钟粒度） ----------
 rng = random.Random(5)
+check("interval_minutes_basic", scheduler.interval_next(now10, 30, 0, rng) == now10 + timedelta(minutes=30))
+check("interval_minutes_clamp_min", scheduler.interval_next(now10, 0, 0, rng) == now10 + timedelta(minutes=1))
+check("interval_none_default", scheduler.interval_next(now10, None, 0, rng) == now10 + timedelta(hours=6))
 for _ in range(100):
-    nxt = scheduler.interval_next(now10, 6, 30, rng)
+    nxt = scheduler.interval_next(now10, 30, 5, rng)
     delta_min = (nxt - now10).total_seconds() / 60
-    if not (360 <= delta_min <= 390.0001):
+    if not (30 <= delta_min <= 35.0001):
         check("interval_jitter_range", False, f"{delta_min}min")
         break
 else:
     check("interval_jitter_range", True)
-nxt0 = scheduler.interval_next(now10, 6, 0, rng)
-check("interval_no_jitter", nxt0 == now10.replace(hour=16))
 
 # ---------- advance ----------
-cfg_i = {"mode": "interval", "interval_hours": 6, "jitter_minutes": 0}
+cfg_i = {"mode": "interval", "interval_minutes": 360, "jitter_minutes": 0}
+cfg_legacy = {"mode": "interval", "interval_hours": 2, "jitter_minutes": 0}  # 旧键兼容
 cfg_d = {"mode": "daily", "daily_times": "09:30,20:00"}
 check("advance_interval", scheduler.advance(cfg_i, now10, rng) == now10.replace(hour=16))
+check("advance_legacy_hours", scheduler.advance(cfg_legacy, now10, rng) == now10.replace(hour=12))
 check("advance_daily", scheduler.advance(cfg_d, now10, rng) == datetime(2026, 11, 6, 20, 0))
 
 # ---------- 状态默认 ----------

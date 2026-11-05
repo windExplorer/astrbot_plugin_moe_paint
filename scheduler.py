@@ -108,25 +108,39 @@ def next_daily_slot(times: list[tuple[int, int]], now: datetime) -> datetime:
 
 
 def interval_next(
-    now: datetime, hours: float, jitter_minutes: float, rng: random.Random
+    now: datetime, minutes: float, jitter_minutes: float, rng: random.Random
 ) -> datetime:
-    """interval 模式的下一次：now + N 小时 ± jitter（jitter 只加不减，往保守方向偏）。"""
-    hours = max(0.25, float(hours or 6))
+    """interval 模式的下一次：now + N 分钟 ± jitter（jitter 只加不减，往保守方向偏）。
+
+    分钟粒度：配置 interval_minutes，最低 1 分钟。单张要画几十秒，而循环是
+    「跑完一张再从当下起算下轮」，间隔低于单张耗时只会自然退化为连画，不会堆积并发。
+    """
+    try:
+        minutes = max(1.0, float(minutes if minutes is not None else 360))
+    except (TypeError, ValueError):
+        minutes = 360.0
     jitter = 0.0
     try:
         jitter = max(0.0, float(jitter_minutes or 0))
     except (TypeError, ValueError):
         jitter = 0.0
     if jitter > 0:
-        hours += rng.uniform(0, jitter / 60.0)
-    return now + timedelta(hours=hours)
+        minutes += rng.uniform(0, jitter)
+    return now + timedelta(minutes=minutes)
 
 
 def advance(cfg: dict, base: datetime, rng: random.Random) -> datetime:
     """从 base 起算下一个计划点（跑完一轮 / 安静时段跳过时用）。"""
     if str(cfg.get("mode") or "interval").strip() == "daily":
         return next_daily_slot(parse_daily_times(cfg.get("daily_times")), base)
-    return interval_next(base, cfg.get("interval_hours"), cfg.get("jitter_minutes"), rng)
+    minutes = cfg.get("interval_minutes")
+    if minutes is None or str(minutes).strip() == "":
+        # v0.1.1 及更早的配置键是 interval_hours（小时）：旧档兼容，×60 换算
+        try:
+            minutes = float(cfg.get("interval_hours") or 6) * 60
+        except (TypeError, ValueError):
+            minutes = 360
+    return interval_next(base, minutes, cfg.get("jitter_minutes"), rng)
 
 
 def initial_due(cfg: dict, now: datetime, rng: random.Random) -> datetime:

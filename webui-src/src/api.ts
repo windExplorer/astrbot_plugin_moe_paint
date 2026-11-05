@@ -143,7 +143,7 @@ export interface StatusPayload {
   next_due: string | null;
   last_run_note: string;
   mode: string;
-  interval_hours: number;
+  interval_minutes: number;
   daily_times: string;
   quiet_hours: string;
   max_per_day: number;

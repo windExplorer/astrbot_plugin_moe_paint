@@ -75,11 +75,11 @@
         "default": "interval",
         "hint": "interval=固定间隔；daily=每日时刻"
       },
-      "interval_hours": {
-        "description": "间隔小时",
+      "interval_minutes": {
+        "description": "间隔分钟",
         "type": "int",
-        "default": 6,
-        "hint": "interval 模式：每 N 小时一张"
+        "default": 360,
+        "hint": "interval 模式：每 N 分钟定时生成一张（最低 1，建议 ≥5——单张通常要画几十秒）。默认 360 = 每 6 小时。间隔调小后记得同步调大「每日上限」"
       },
       "jitter_minutes": {
         "description": "抖动分钟",

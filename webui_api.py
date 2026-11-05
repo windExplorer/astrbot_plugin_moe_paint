@@ -103,7 +103,7 @@ async def h_status(plugin) -> dict:
         "last_run_note": sched.last_run_note,
         "last_run_ts": sched.last_run_ts,
         "mode": str(scfg.get("mode") or "interval"),
-        "interval_hours": scfg.get("interval_hours"),
+        "interval_minutes": scfg.get("interval_minutes"),
         "daily_times": str(scfg.get("daily_times") or ""),
         "quiet_hours": str(scfg.get("quiet_hours") or ""),
         "max_per_day": scfg.get("max_per_day"),
