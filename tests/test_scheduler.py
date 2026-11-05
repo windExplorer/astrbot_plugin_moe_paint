@@ -72,5 +72,13 @@ check("advance_daily", scheduler.advance(cfg_d, now10, rng) == datetime(2026, 11
 st = scheduler.ScheduleState()
 check("state_defaults", st.next_due is None and st.consecutive_failures == 0 and not st.auto_paused)
 
+# ---------- 每日上限 ----------
+check("cap_reached_at_limit", scheduler.cap_reached(4, 4) is True)
+check("cap_below_limit", scheduler.cap_reached(4, 3) is False)
+check("cap_zero_unlimited", scheduler.cap_reached(0, 999) is False)
+check("cap_none_unlimited", scheduler.cap_reached(None, 999) is False)
+check("cap_bad_value_unlimited", scheduler.cap_reached("abc", 5) is False)
+check("cap_string_value", scheduler.cap_reached("4", 4) is True)
+
 print("scheduler:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

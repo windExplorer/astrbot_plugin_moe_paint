@@ -134,6 +134,15 @@ def initial_due(cfg: dict, now: datetime, rng: random.Random) -> datetime:
     return advance(cfg, now, rng)
 
 
+def cap_reached(cap, success_today: int) -> bool:
+    """每日上限判定（纯函数）：cap<=0 = 不限；只数成功的（失败轮不占名额）。"""
+    try:
+        cap = int(cap or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    return cap > 0 and int(success_today or 0) >= cap
+
+
 # --------------------------------------------------------------------------- #
 # 循环壳
 # --------------------------------------------------------------------------- #
@@ -168,6 +177,24 @@ async def run_loop(plugin) -> None:
                     # 上一张还没画完（手动触发/WebUI 触发占着）：顺延，不排队
                     state.next_due = advance(cfg, state.next_due, rng)
                     state.last_run_note = "上一张仍在生成，本次顺延"
+                    continue
+                # 每日上限（max_per_day，0=不限）：只数今天成功的张数；手动
+                # 「/绘卷 画一张」不走这里，不受限。达限顺延到下个计划点
+                # （明天 0 点后 count_day_success 自然归零，恢复生成）。
+                today_n = 0
+                if plugin.store is not None:
+                    try:
+                        today_n = await plugin.store.count_day_success(plugin._today())
+                    except Exception as e:
+                        logger.warning(f"[萌萌绘卷] 今日张数查询失败（本次不执行上限）: {e}")
+                if cap_reached(cfg.get("max_per_day"), today_n):
+                    state.next_due = advance(cfg, state.next_due, rng)
+                    state.last_run_note = (
+                        f"已达每日上限（{today_n}/{cfg.get('max_per_day')}），"
+                        f"今日不再定时生成，下次计划 "
+                        f"{state.next_due.strftime('%m-%d %H:%M')}"
+                    )
+                    logger.info(f"[萌萌绘卷] {state.last_run_note}")
                     continue
                 summary = await plugin.generate_one(reason="schedule")
                 state.last_run_ts = int(now.timestamp())
