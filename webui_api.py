@@ -205,7 +205,10 @@ def _safe_gallery_path(plugin, relpath: str) -> "Path | None":
 
 
 async def h_image(plugin):
-    """GET /image?id= → file_response（路径只按库内 relpath 拼，杜绝穿越）。"""
+    """GET /image?id= → file_response（路径只按库内 relpath 拼，杜绝穿越）。
+
+    直链模式（standalone/外部工具用）；内嵌 Page 的沙箱 iframe 里直链不可靠，
+    前端一律走 /thumb（data URL）。"""
     if plugin.store is None:
         return err("数据库未就绪")
     try:
@@ -222,6 +225,70 @@ async def h_image(plugin):
 
     ext = path.suffix.lower()
     return file_response(str(path), content_type=gallery_store.mime_for(ext))
+
+
+# --------------------------------------------------------------------------- #
+# 缩略图（data URL：内嵌 Page 的 <img> 唯一可靠姿势，anima ImageViewer 同款结论）
+# --------------------------------------------------------------------------- #
+
+import base64  # noqa: E402  （局部依赖，集中放这里保持顶部干净）
+from collections import OrderedDict  # noqa: E402
+
+_THUMB_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
+_THUMB_CACHE_MAX = 256
+
+
+def _thumb_data_url(path: Path, size: int) -> str:
+    """读文件并缩到最长边 ≤ size 的 JPEG data URL；Pillow 不可用则回退原图 base64。"""
+    try:
+        from PIL import Image
+
+        with Image.open(str(path)) as im:
+            im = im.convert("RGB")
+            im.thumbnail((size, size))
+            import io
+
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=82)
+            data = buf.getvalue()
+        return f"data:image/jpeg;base64,{base64.b64encode(data).decode('ascii')}"
+    except ImportError:
+        pass  # 没有 Pillow：回退原图 base64（体积大但能用）
+    except Exception as e:
+        raise RuntimeError(f"缩略图生成失败: {e}") from e
+    raw = path.read_bytes()
+    return f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+async def h_thumb(plugin):
+    """GET /thumb?id=&size=300 → {data_url}；服务端 LRU 缓存（键含文件 mtime）。"""
+    if plugin.store is None:
+        return err("数据库未就绪")
+    try:
+        rec_id = int(_q("id", "0"))
+    except ValueError:
+        return err("id 不合法")
+    size = _qi("size", 320, 64, 2400)
+    rec = await plugin.store.get_record(rec_id)
+    if rec is None or not rec.get("image_relpath"):
+        return err("记录不存在或没有图片")
+    path = _safe_gallery_path(plugin, rec["image_relpath"])
+    if path is None or not path.is_file():
+        return err("图片文件不存在")
+    try:
+        mtime = int(path.stat().st_mtime)
+    except OSError:
+        mtime = 0
+    key = (rec_id, size, mtime)
+    hit = _THUMB_CACHE.get(key)
+    if hit is None:
+        hit = await asyncio.to_thread(_thumb_data_url, path, size)
+        _THUMB_CACHE[key] = hit
+        while len(_THUMB_CACHE) > _THUMB_CACHE_MAX:
+            _THUMB_CACHE.popitem(last=False)
+    else:
+        _THUMB_CACHE.move_to_end(key)
+    return ok({"data_url": hit, "size": size})
 
 
 async def h_delete(plugin) -> dict:
@@ -312,6 +379,7 @@ def register(plugin) -> None:
         ("/records", h_records, ["GET"]),
         ("/record", h_record, ["GET"]),
         ("/image", h_image, ["GET"]),
+        ("/thumb", h_thumb, ["GET"]),
         ("/record/delete", h_delete, ["POST"]),
         ("/record/star", h_star, ["POST"]),
         ("/record/resend", h_resend, ["POST"]),

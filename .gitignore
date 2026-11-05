@@ -9,6 +9,8 @@ __pycache__/
 
 # 前端
 node_modules/
+# 图库页构建产物（build_zip.ps1 打包时现场构建，不入库）
+pages/moe-paint/
 
 # 临时文件
 cm_tmp.txt
