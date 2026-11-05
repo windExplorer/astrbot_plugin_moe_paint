@@ -1,0 +1,17 @@
+# 打包产物（只增不删，但不入库）
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# 前端
+node_modules/
+
+# 临时文件
+cm_tmp.txt
+_tmp_*
+*_local.zip
+.reasonix/
