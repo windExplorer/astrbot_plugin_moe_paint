@@ -232,3 +232,24 @@ export function apiWorkflows() {
     "/workflows",
   );
 }
+
+// ---------------------------------------------------------------- 配置
+
+export interface ProviderRow {
+  id: string;
+  model: string;
+  label: string;
+  is_default: boolean;
+}
+
+export function apiGetConfig() {
+  return apiGet<{ items: Record<string, any>; schema: Record<string, any> }>("/config", 15000);
+}
+
+export function apiSaveConfig(items: Record<string, any>) {
+  return apiPost<{ changed: string[] }>("/config", { items }, 15000);
+}
+
+export function apiProviders() {
+  return apiGet<{ items: ProviderRow[]; default_id: string }>("/providers", 10000);
+}

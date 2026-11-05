@@ -1,12 +1,15 @@
 <script setup lang="ts">
-// 萌萌绘卷 · 图库 WebUI（plugin Page，sandbox iframe 内运行）
+// 萌萌绘卷 · 图库 + 设置 WebUI（plugin Page，sandbox iframe 内运行）
 // 硬约束（AGENTS.md 第八节 + 同族踩坑记录）：
 //  - 不碰 localStorage/cookie（bridge.ts 有安全封装，本页干脆不用持久化）；
 //  - 不用原生 confirm/alert（删除用 n-popconfirm 两段确认）；
-//  - 图片一律走 /thumb 的 data URL（直链在沙箱 iframe 不可靠，anima 同款结论）。
+//  - 图片一律走 /thumb 的 data URL（直链在沙箱 iframe 不可靠，anima 同款结论）；
+//  - 配置保存走「扁平点号键 + 后端白名单」（user_gateway 模式），只提交本卡片字段，
+//    绝不把整份配置回传——防 box v0.12.7「一次坏保存清空配置」。
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   NButton,
+  NCard,
   NConfigProvider,
   NDescriptions,
   NDescriptionsItem,
@@ -14,11 +17,14 @@ import {
   NDrawerContent,
   NEmpty,
   NInput,
+  NInputNumber,
   NPagination,
   NPopconfirm,
   NSelect,
   NSpin,
   NSwitch,
+  NTabPane,
+  NTabs,
   NTag,
   createDiscreteApi,
   darkTheme,
@@ -29,13 +35,18 @@ import { getContext, onContext } from "./bridge";
 import {
   apiControl,
   apiDeleteRecord,
+  apiGetConfig,
+  apiProviders,
   apiRecords,
   apiResend,
+  apiSaveConfig,
   apiStar,
   apiStats,
   apiStatus,
   apiThumb,
+  apiWorkflows,
   type GenRecord,
+  type ProviderRow,
   type StatsPayload,
   type StatusPayload,
 } from "./api";
@@ -51,6 +62,7 @@ const { message } = createDiscreteApi(["message"], {
 });
 
 // ---------- 状态 ----------
+const activeTab = ref<string>("gallery");
 const loading = ref(false);
 const status = ref<StatusPayload | null>(null);
 const stats = ref<StatsPayload | null>(null);
@@ -124,6 +136,22 @@ function parseBrief(brief: string): Record<string, string> {
     return {};
   }
 }
+function briefOf(rec: GenRecord): string {
+  try {
+    const b = JSON.parse(rec.brief || "{}");
+    if (b && typeof b === "object") {
+      return `题材=${b.subject ?? "-"}；风格=${b.style ?? "-"}；构图=${b.composition ?? "-"}；光色=${b.light ?? "-"}；氛围=${b.mood ?? "-"}`;
+    }
+  } catch {
+    /* 原样展示 */
+  }
+  return rec.brief || "-";
+}
+function onPageSizeChange(n: number) {
+  pageSize.value = n;
+  page.value = 1;
+  loadRecords();
+}
 async function copyText(text: string, label: string) {
   if (!text) return;
   try {
@@ -145,22 +173,6 @@ async function copyText(text: string, label: string) {
     }
     document.body.removeChild(ta);
   }
-}
-function briefOf(rec: GenRecord): string {
-  try {
-    const b = JSON.parse(rec.brief || "{}");
-    if (b && typeof b === "object") {
-      return `题材=${b.subject ?? "-"}；风格=${b.style ?? "-"}；构图=${b.composition ?? "-"}；光色=${b.light ?? "-"}；氛围=${b.mood ?? "-"}`;
-    }
-  } catch {
-    /* 原样展示 */
-  }
-  return rec.brief || "-";
-}
-function onPageSizeChange(n: number) {
-  pageSize.value = n;
-  page.value = 1;
-  loadRecords();
 }
 
 // ---------- 数据加载 ----------
@@ -282,7 +294,7 @@ async function resend(rec: GenRecord) {
   try {
     const d = await apiResend(rec.id);
     const okN = (d.results || []).filter((r) => r.ok).length;
-    if (!d.results?.length) message.info("投递名单为空（先在配置或指令里添加会话）");
+    if (!d.results?.length) message.info("投递名单为空（先在设置页或指令里添加会话）");
     else if (okN === d.results.length) message.success(`已重投 ${okN} 个会话`);
     else message.warning(`重投完成：成功 ${okN} / ${d.results.length}（详情看投递状态）`);
     await loadRecords();
@@ -300,6 +312,200 @@ async function del(rec: GenRecord) {
   } catch (e: any) {
     message.error(`删除失败：${e?.message || e}`);
   }
+}
+
+// ------------------------------------------------------------------ //
+// 设置页（配置 / 模板编辑器）
+// ------------------------------------------------------------------ //
+
+const cfgLoading = ref(false);
+const cfgLoaded = ref(false);
+const cfgItems = ref<Record<string, any>>({});
+const providers = ref<ProviderRow[]>([]);
+const saving = reactive<Record<string, boolean>>({});
+
+interface TmplRow {
+  name: string;
+  file: string;
+  tag_style: string;
+  size_preset: string;
+  default_negative: string;
+  enabled: boolean;
+  positive_node: string;
+  negative_node: string;
+  latent_node: string;
+  positive_field: string;
+  negative_field: string;
+  ok?: boolean;
+  problem?: string;
+}
+const tmplRows = ref<TmplRow[]>([]);
+
+const modeOptions = [
+  { label: "固定间隔（每 N 分钟）", value: "interval" },
+  { label: "每日时刻表", value: "daily" },
+];
+const styleOptions = [
+  { label: "danbooru（动漫英文标签）", value: "danbooru" },
+  { label: "natural（写实中文自然语言）", value: "natural" },
+];
+const presetOptions = [
+  { label: "sdxl（1216×832 / 832×1216 / 1024²）", value: "sdxl" },
+  { label: "flux（1344×768 / 768×1344 / 1024²）", value: "flux" },
+  { label: "sd15（768×512 / 512×768 / 512²）", value: "sd15" },
+];
+const providerOptions = computed(() => [
+  { label: "全局默认提供商", value: "" },
+  ...providers.value.map((p) => ({
+    label: p.label + (p.is_default ? "（AstrBot 默认）" : ""),
+    value: p.id,
+  })),
+]);
+
+function cfgGet(key: string, dflt: any = ""): any {
+  const v = cfgItems.value[key];
+  return v === undefined || v === null ? dflt : v;
+}
+function cfgSet(key: string, v: any) {
+  cfgItems.value[key] = v;
+}
+function cfgNum(key: string, dflt: number): number {
+  const n = Number(cfgItems.value[key]);
+  return Number.isFinite(n) ? n : dflt;
+}
+function linesToText(v: any): string {
+  return Array.isArray(v) ? v.join("\n") : String(v ?? "");
+}
+const sessionsText = computed({
+  get: () => linesToText(cfgItems.value["delivery.sessions"]),
+  set: (s: string) => {
+    cfgItems.value["delivery.sessions"] = String(s)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  },
+});
+const extraWordsText = computed({
+  get: () => {
+    const d = cfgItems.value["theme.extra_words"];
+    if (!d || typeof d !== "object") return "";
+    return Object.entries(d)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n");
+  },
+  set: (s: string) => {
+    const out: Record<string, string> = {};
+    for (const line of String(s).split("\n")) {
+      const i = line.indexOf("=");
+      if (i > 0) {
+        const k = line.slice(0, i).trim();
+        const v = line.slice(i + 1).trim();
+        if (k) out[k] = v;
+      }
+    }
+    cfgItems.value["theme.extra_words"] = out;
+  },
+});
+
+function normalizeRow(r: any): TmplRow {
+  return {
+    name: String(r.name || ""),
+    file: String(r.file || ""),
+    tag_style: String(r.tag_style || "danbooru"),
+    size_preset: String(r.size_preset || "sdxl"),
+    default_negative: String(r.default_negative || ""),
+    enabled: r.enabled !== false,
+    positive_node: String(r.positive_node || ""),
+    negative_node: String(r.negative_node || ""),
+    latent_node: String(r.latent_node || ""),
+    positive_field: String(r.positive_field || ""),
+    negative_field: String(r.negative_field || ""),
+    ok: undefined,
+    problem: "",
+  };
+}
+async function mergeTmplValidation() {
+  try {
+    const w = await apiWorkflows();
+    const byKey = new Map(w.templates.map((t) => [`${t.name}|${t.file}`, t]));
+    for (const r of tmplRows.value) {
+      const t = byKey.get(`${r.name}|${r.file}`);
+      if (t) {
+        r.ok = t.ok;
+        r.problem = t.problem || "";
+      }
+    }
+  } catch {
+    /* 校验信息拿不到就不显示 */
+  }
+}
+async function loadConfig() {
+  cfgLoading.value = true;
+  try {
+    const d = await apiGetConfig();
+    cfgItems.value = d.items || {};
+    tmplRows.value = ((d.items || {}).workflow_templates || []).map(normalizeRow);
+    await mergeTmplValidation();
+    try {
+      const p = await apiProviders();
+      providers.value = p.items || [];
+    } catch {
+      /* provider 下拉退化成手填 */
+    }
+    cfgLoaded.value = true;
+  } catch (e: any) {
+    message.error(`加载配置失败：${e?.message || e}`);
+  } finally {
+    cfgLoading.value = false;
+  }
+}
+function onTabChange(name: string) {
+  if (name === "settings" && !cfgLoaded.value && !cfgLoading.value) loadConfig();
+}
+async function saveSection(fields: string[], label: string) {
+  const items: Record<string, any> = {};
+  for (const f of fields) items[f] = cfgItems.value[f];
+  saving[label] = true;
+  try {
+    const d = await apiSaveConfig(items);
+    message.success(`${label}已保存（${d.changed?.length ?? 0} 项）`);
+    await refreshStatus();
+  } catch (e: any) {
+    message.error(`保存失败：${e?.message || e}`);
+  } finally {
+    saving[label] = false;
+  }
+}
+async function saveTemplates() {
+  const entries = tmplRows.value.map((r) => ({
+    name: r.name.trim(),
+    file: r.file.trim(),
+    tag_style: r.tag_style,
+    size_preset: r.size_preset,
+    default_negative: r.default_negative,
+    enabled: r.enabled,
+    positive_node: r.positive_node.trim(),
+    negative_node: r.negative_node.trim(),
+    latent_node: r.latent_node.trim(),
+    positive_field: r.positive_field.trim(),
+    negative_field: r.negative_field.trim(),
+  }));
+  saving["模板"] = true;
+  try {
+    await apiSaveConfig({ workflow_templates: entries });
+    message.success("模板清单已保存");
+    await Promise.all([loadConfig(), refreshStatus()]);
+  } catch (e: any) {
+    message.error(`保存失败：${e?.message || e}`);
+  } finally {
+    saving["模板"] = false;
+  }
+}
+function addTemplate() {
+  tmplRows.value.push(normalizeRow({ name: "新模板", file: "", enabled: true }));
+}
+function removeTemplate(i: number) {
+  tmplRows.value.splice(i, 1);
 }
 
 onMounted(async () => {
@@ -358,67 +564,264 @@ onUnmounted(() => {
         <span v-if="status?.last_run_note" class="muted">{{ status.last_run_note }}</span>
       </section>
 
-      <!-- 筛选条 -->
-      <section class="filters">
-        <n-select v-model:value="fStatus" :options="statusOptions" size="small" style="width: 110px" @update:value="applyFilters" />
-        <n-select v-model:value="fWorkflow" :options="workflowOptions" size="small" style="width: 160px" @update:value="applyFilters" />
-        <n-select v-model:value="fCategory" :options="categoryOptions" size="small" style="width: 140px" filterable @update:value="applyFilters" />
-        <n-input v-model:value="fKeywordInput" placeholder="搜提示词/文案" size="small" style="width: 170px" @keyup.enter="applyKeyword" />
-        <n-button size="small" @click="applyKeyword">搜索</n-button>
-        <label class="star-switch">
-          <n-switch v-model:value="fStarred" size="small" @update:value="applyFilters" />
-          <span>只看收藏</span>
-        </label>
-        <n-button size="small" quaternary @click="refreshAll">刷新</n-button>
-      </section>
+      <n-tabs v-model:value="activeTab" type="line" @update:value="onTabChange">
+        <!-- ============ 图库 ============ -->
+        <n-tab-pane name="gallery" tab="图库">
+          <section class="filters">
+            <n-select v-model:value="fStatus" :options="statusOptions" size="small" style="width: 110px" @update:value="applyFilters" />
+            <n-select v-model:value="fWorkflow" :options="workflowOptions" size="small" style="width: 160px" @update:value="applyFilters" />
+            <n-select v-model:value="fCategory" :options="categoryOptions" size="small" style="width: 140px" filterable @update:value="applyFilters" />
+            <n-input v-model:value="fKeywordInput" placeholder="搜提示词/文案" size="small" style="width: 170px" @keyup.enter="applyKeyword" />
+            <n-button size="small" @click="applyKeyword">搜索</n-button>
+            <label class="star-switch">
+              <n-switch v-model:value="fStarred" size="small" @update:value="applyFilters" />
+              <span>只看收藏</span>
+            </label>
+            <n-button size="small" quaternary @click="refreshAll">刷新</n-button>
+          </section>
 
-      <!-- 网格 -->
-      <n-spin :show="loading">
-        <n-empty
-          v-if="!records.length && !loading"
-          description="还没有记录 —— 点右上角「立即画一张」开张，或等调度到点"
-          style="margin: 60px 0"
-        />
-        <div v-else class="grid">
-          <div
-            v-for="r in records"
-            :key="r.id"
-            class="gcard"
-            :class="{ failed: r.status === 'failed', running: r.status === 'running' }"
-            @click="openDetail(r)"
-          >
-            <div class="thumb">
-              <img v-if="r.status === 'success' && thumbs[r.id]" :src="thumbs[r.id]" alt="" loading="lazy" />
-              <div v-else-if="r.status === 'success'" class="ph spin-box"><n-spin size="small" /></div>
-              <div v-else-if="r.status === 'running'" class="ph"><n-spin size="small" /><span>生成中…</span></div>
-              <div v-else class="ph ph-fail"><span>失败</span></div>
-              <span v-if="r.starred" class="star">★</span>
-            </div>
-            <div class="meta">
-              <div class="cap">{{ r.caption || parseBrief(r.brief).subject || `#${r.id}` }}</div>
-              <div class="sub muted">
-                {{ r.workflow || "?" }}
-                <template v-if="r.status === 'success'"> · {{ r.width }}×{{ r.height }} · {{ fmtTs(r.ts) }}</template>
-                <template v-else-if="r.status === 'failed'"> · {{ fmtTs(r.ts) }}</template>
+          <n-spin :show="loading">
+            <n-empty
+              v-if="!records.length && !loading"
+              description="还没有记录 —— 点右上角「立即画一张」开张，或等调度到点"
+              style="margin: 60px 0"
+            />
+            <div v-else class="grid">
+              <div
+                v-for="r in records"
+                :key="r.id"
+                class="gcard"
+                :class="{ failed: r.status === 'failed', running: r.status === 'running' }"
+                @click="openDetail(r)"
+              >
+                <div class="thumb">
+                  <img v-if="r.status === 'success' && thumbs[r.id]" :src="thumbs[r.id]" alt="" loading="lazy" />
+                  <div v-else-if="r.status === 'success'" class="ph spin-box"><n-spin size="small" /></div>
+                  <div v-else-if="r.status === 'running'" class="ph"><n-spin size="small" /><span>生成中…</span></div>
+                  <div v-else class="ph ph-fail"><span>失败</span></div>
+                  <span v-if="r.starred" class="star">★</span>
+                </div>
+                <div class="meta">
+                  <div class="cap">{{ r.caption || parseBrief(r.brief).subject || `#${r.id}` }}</div>
+                  <div class="sub muted">
+                    {{ r.workflow || "?" }}
+                    <template v-if="r.status === 'success'"> · {{ r.width }}×{{ r.height }} · {{ fmtTs(r.ts) }}</template>
+                    <template v-else-if="r.status === 'failed'"> · {{ fmtTs(r.ts) }}</template>
+                  </div>
+                  <div v-if="r.status === 'failed'" class="errmsg">{{ r.error }}</div>
+                </div>
               </div>
-              <div v-if="r.status === 'failed'" class="errmsg">{{ r.error }}</div>
             </div>
-          </div>
-        </div>
-      </n-spin>
+          </n-spin>
 
-      <div class="pager">
-        <n-pagination
-          v-model:page="page"
-          :item-count="total"
-          :page-size="pageSize"
-          :page-sizes="[24, 48, 96]"
-          show-size-picker
-          @update:page="loadRecords"
-          @update:page-size="onPageSizeChange"
-        />
-        <span class="muted">共 {{ total }} 条</span>
-      </div>
+          <div class="pager">
+            <n-pagination
+              v-model:page="page"
+              :item-count="total"
+              :page-size="pageSize"
+              :page-sizes="[24, 48, 96]"
+              show-size-picker
+              @update:page="loadRecords"
+              @update:page-size="onPageSizeChange"
+            />
+            <span class="muted">共 {{ total }} 条</span>
+          </div>
+        </n-tab-pane>
+
+        <!-- ============ 设置 ============ -->
+        <n-tab-pane name="settings" tab="设置">
+          <n-spin :show="cfgLoading">
+            <div class="cards">
+              <!-- 调度 -->
+              <n-card title="调度" size="small">
+                <template #header-extra>
+                  <n-button size="small" type="primary" :loading="!!saving['调度']" @click="saveSection(['enabled', 'schedule.mode', 'schedule.interval_minutes', 'schedule.jitter_minutes', 'schedule.daily_times', 'schedule.quiet_hours', 'schedule.max_per_day'], '调度')">
+                    保存
+                  </n-button>
+                </template>
+                <div class="fgrid">
+                  <label class="field"><span>总开关</span><n-switch :value="!!cfgGet('enabled', true)" @update:value="(v) => cfgSet('enabled', v)" /></label>
+                  <label class="field"><span>模式</span>
+                    <n-select :value="cfgGet('schedule.mode', 'interval')" :options="modeOptions" size="small" @update:value="(v) => cfgSet('schedule.mode', v)" />
+                  </label>
+                  <label class="field"><span>间隔分钟（最低 1）</span>
+                    <n-input-number :value="cfgNum('schedule.interval_minutes', 360)" :min="1" :max="43200" size="small" @update:value="(v) => cfgSet('schedule.interval_minutes', v ?? 360)" />
+                  </label>
+                  <label class="field"><span>抖动分钟</span>
+                    <n-input-number :value="cfgNum('schedule.jitter_minutes', 30)" :min="0" :max="1440" size="small" @update:value="(v) => cfgSet('schedule.jitter_minutes', v ?? 0)" />
+                  </label>
+                  <label class="field"><span>每日时刻表（逗号分隔）</span>
+                    <n-input :value="String(cfgGet('schedule.daily_times', '09:30,20:00'))" size="small" placeholder="09:30,20:00" @update:value="(v) => cfgSet('schedule.daily_times', v)" />
+                  </label>
+                  <label class="field"><span>安静时段</span>
+                    <n-input :value="String(cfgGet('schedule.quiet_hours', '01:00-08:00'))" size="small" placeholder="01:00-08:00，留空关闭" @update:value="(v) => cfgSet('schedule.quiet_hours', v)" />
+                  </label>
+                  <label class="field"><span>每日上限（0 = 不限）</span>
+                    <n-input-number :value="cfgNum('schedule.max_per_day', 4)" :min="0" :max="1000" size="small" @update:value="(v) => cfgSet('schedule.max_per_day', v ?? 0)" />
+                  </label>
+                </div>
+                <div class="hint">手动「立即画一张」不受每日上限约束；间隔低于单张耗时时自然退化为连画，不会堆积并发。</div>
+              </n-card>
+
+              <!-- ComfyUI -->
+              <n-card title="ComfyUI 服务器" size="small">
+                <template #header-extra>
+                  <n-button size="small" type="primary" :loading="!!saving['ComfyUI']" @click="saveSection(['comfyui.url', 'comfyui.draw_timeout', 'comfyui.queue_extra_timeout', 'comfyui.hard_cap', 'comfyui.poll_interval', 'comfyui.queue_defer_threshold'], 'ComfyUI')">
+                    保存
+                  </n-button>
+                </template>
+                <div class="fgrid">
+                  <label class="field wide"><span>服务器地址</span>
+                    <n-input :value="String(cfgGet('comfyui.url', 'http://127.0.0.1:8188'))" size="small" @update:value="(v) => cfgSet('comfyui.url', v)" />
+                  </label>
+                  <label class="field"><span>队列避让阈值（0 = 关）</span>
+                    <n-input-number :value="cfgNum('comfyui.queue_defer_threshold', 2)" :min="0" :max="100" size="small" @update:value="(v) => cfgSet('comfyui.queue_defer_threshold', v ?? 0)" />
+                  </label>
+                  <label class="field"><span>基础等待（秒）</span>
+                    <n-input-number :value="cfgNum('comfyui.draw_timeout', 180)" :min="30" :max="3600" size="small" @update:value="(v) => cfgSet('comfyui.draw_timeout', v ?? 180)" />
+                  </label>
+                  <label class="field"><span>每任务排队加时（秒）</span>
+                    <n-input-number :value="cfgNum('comfyui.queue_extra_timeout', 60)" :min="0" :max="3600" size="small" @update:value="(v) => cfgSet('comfyui.queue_extra_timeout', v ?? 60)" />
+                  </label>
+                  <label class="field"><span>等待硬上限（秒）</span>
+                    <n-input-number :value="cfgNum('comfyui.hard_cap', 600)" :min="30" :max="14400" size="small" @update:value="(v) => cfgSet('comfyui.hard_cap', v ?? 600)" />
+                  </label>
+                  <label class="field"><span>轮询间隔（秒）</span>
+                    <n-input-number :value="cfgNum('comfyui.poll_interval', 2)" :min="1" :max="30" size="small" @update:value="(v) => cfgSet('comfyui.poll_interval', v ?? 2)" />
+                  </label>
+                </div>
+                <div class="hint">与萌绘共用服务器时，定时出图提交前查远程队列：前方 ≥ 阈值个任务就顺延 5 分钟，给交互出图让路。</div>
+              </n-card>
+
+              <!-- 提示词模型 -->
+              <n-card title="提示词模型（LLM）" size="small">
+                <template #header-extra>
+                  <n-button size="small" type="primary" :loading="!!saving['提示词模型']" @click="saveSection(['llm.provider_id', 'llm.timeout'], '提示词模型')">
+                    保存
+                  </n-button>
+                </template>
+                <div class="fgrid">
+                  <label class="field"><span>提供商（一提供商 = 一模型）</span>
+                    <n-select :value="String(cfgGet('llm.provider_id', ''))" :options="providerOptions" size="small" filterable tag :consistent-menu-width="false" @update:value="(v) => cfgSet('llm.provider_id', v)" />
+                  </label>
+                  <label class="field"><span>调用超时（秒）</span>
+                    <n-input-number :value="cfgNum('llm.timeout', 45)" :min="10" :max="300" size="small" @update:value="(v) => cfgSet('llm.timeout', v ?? 45)" />
+                  </label>
+                </div>
+                <div class="hint">下拉来自 AstrBot 已加载的提供商；不在名单里的 id 可手输（tag 模式）。留空 = 全局默认提供商。</div>
+              </n-card>
+
+              <!-- 投递 -->
+              <n-card title="投递" size="small">
+                <template #header-extra>
+                  <n-button size="small" type="primary" :loading="!!saving['投递']" @click="saveSection(['delivery.sessions', 'delivery.caption_on', 'delivery.caption_template'], '投递')">
+                    保存
+                  </n-button>
+                </template>
+                <div class="fgrid">
+                  <label class="field wide"><span>投递会话 UMO（每行一个；空 = 只入库不投递）</span>
+                    <n-input :value="sessionsText" type="textarea" :rows="3" size="small" placeholder="aiocqhttp:GroupMessage:123456" @update:value="(v) => (sessionsText = v)" />
+                  </label>
+                  <label class="field"><span>附带文案</span><n-switch :value="!!cfgGet('delivery.caption_on', true)" @update:value="(v) => cfgSet('delivery.caption_on', v)" /></label>
+                  <label class="field"><span>文案模板</span>
+                    <n-input :value="String(cfgGet('delivery.caption_template', '{caption}'))" size="small" placeholder="{caption}｜{category}" @update:value="(v) => cfgSet('delivery.caption_template', v)" />
+                  </label>
+                </div>
+                <div class="hint">推荐在群里用指令管理：/绘卷 投递 开启。占位符可用 {caption} {category} {subject} {workflow}。</div>
+              </n-card>
+
+              <!-- 主题词池 -->
+              <n-card title="主题词池" size="small">
+                <template #header-extra>
+                  <n-button size="small" type="primary" :loading="!!saving['主题词池']" @click="saveSection(['theme.disabled_categories', 'theme.extra_words'], '主题词池')">
+                    保存
+                  </n-button>
+                </template>
+                <div class="fgrid">
+                  <label class="field"><span>停用类别（逗号分隔）</span>
+                    <n-input :value="String(cfgGet('theme.disabled_categories', ''))" size="small" placeholder="人物肖像,自然生态" @update:value="(v) => cfgSet('theme.disabled_categories', v)" />
+                  </label>
+                  <label class="field wide"><span>词池扩充（每行一条：键=词1,词2…）</span>
+                    <n-input :value="extraWordsText" type="textarea" :rows="3" size="small" placeholder="宇宙星空=冰环行星的极夜,双月夜潮&#10;我的猫=橘猫打翻鱼缸&#10;风格=新海诚式光影" @update:value="(v) => (extraWordsText = v)" />
+                  </label>
+                </div>
+                <div class="hint">键可以是内置类别名（追加题材）、新类别名，或 风格/光色/氛围；构图项格式 名称@landscape|portrait|square。</div>
+              </n-card>
+
+              <!-- 图库与管理 -->
+              <n-card title="图库与管理" size="small">
+                <template #header-extra>
+                  <n-button size="small" type="primary" :loading="!!saving['图库与管理']" @click="saveSection(['gallery.max_total_mb', 'admin_notify_umo'], '图库与管理')">
+                    保存
+                  </n-button>
+                </template>
+                <div class="fgrid">
+                  <label class="field"><span>图库容量上限（MB，0 = 不淘汰）</span>
+                    <n-input-number :value="cfgNum('gallery.max_total_mb', 1024)" :min="0" :max="1048576" size="small" @update:value="(v) => cfgSet('gallery.max_total_mb', v ?? 1024)" />
+                  </label>
+                  <label class="field"><span>管理员通知 UMO（连续失败暂停时）</span>
+                    <n-input :value="String(cfgGet('admin_notify_umo', ''))" size="small" placeholder="留空不通知" @update:value="(v) => cfgSet('admin_notify_umo', v)" />
+                  </label>
+                </div>
+                <div class="hint">容量超限按最旧优先淘汰非收藏图；收藏（★）永不淘汰。</div>
+              </n-card>
+
+              <!-- 工作流模板 -->
+              <n-card title="工作流模板" size="small">
+                <template #header-extra>
+                  <div class="row-gap">
+                    <n-button size="small" @click="addTemplate">添加模板</n-button>
+                    <n-button size="small" quaternary @click="mergeTmplValidation(); message.info('已刷新校验状态')">刷新校验</n-button>
+                    <n-button size="small" type="primary" :loading="!!saving['模板']" @click="saveTemplates">保存模板清单</n-button>
+                  </div>
+                </template>
+                <div class="hint" style="margin-bottom: 8px">
+                  模板 = 一份 ComfyUI API 格式 JSON（放 data/plugin_data/astrbot_plugin_moe_paint/workflows/）+ 下面这些元信息。节点定位自动进行（KSampler 引用），定位不了的才填覆盖项；保存后自动重载并校验。
+                </div>
+                <n-empty v-if="!tmplRows.length" description="还没有模板" style="margin: 20px 0" />
+                <div v-for="(r, i) in tmplRows" :key="i" class="tmpl">
+                  <div class="tmpl-head">
+                    <n-tag size="small" :type="r.ok === undefined ? 'default' : r.ok ? 'success' : 'error'">
+                      {{ r.ok === undefined ? '未校验' : r.ok ? '校验通过' : '校验失败' }}
+                    </n-tag>
+                    <span class="mono">{{ r.file || '（未填文件名）' }}</span>
+                    <n-popconfirm @positive-click="removeTemplate(i)">
+                      <template #trigger>
+                        <n-button size="tiny" type="error" quaternary>删除</n-button>
+                      </template>
+                      从清单里移除模板「{{ r.name }}」？（保存后生效，文件不会删）
+                    </n-popconfirm>
+                  </div>
+                  <div v-if="r.ok === false" class="errmsg">{{ r.problem }}</div>
+                  <div class="fgrid">
+                    <label class="field"><span>名称</span>
+                      <n-input v-model:value="r.name" size="small" />
+                    </label>
+                    <label class="field"><span>工作流文件名</span>
+                      <n-input v-model:value="r.file" size="small" placeholder="anima_t2i.json" />
+                    </label>
+                    <label class="field"><span>标签风格</span>
+                      <n-select v-model:value="r.tag_style" :options="styleOptions" size="small" />
+                    </label>
+                    <label class="field"><span>尺寸预设</span>
+                      <n-select v-model:value="r.size_preset" :options="presetOptions" size="small" />
+                    </label>
+                    <label class="field wide"><span>默认负面词（留空用 JSON 里的）</span>
+                      <n-input v-model:value="r.default_negative" size="small" />
+                    </label>
+                    <label class="field"><span>启用</span><n-switch v-model:value="r.enabled" size="small" /></label>
+                    <label class="field"><span>正向节点 ID（可选）</span><n-input v-model:value="r.positive_node" size="small" placeholder="自动定位失败才填" /></label>
+                    <label class="field"><span>负向节点 ID（可选）</span><n-input v-model:value="r.negative_node" size="small" /></label>
+                    <label class="field"><span>Latent 节点 ID（可选）</span><n-input v-model:value="r.latent_node" size="small" /></label>
+                    <label class="field"><span>正向输入框名（可选）</span><n-input v-model:value="r.positive_field" size="small" placeholder="非 text 时必填（如 prompt）" /></label>
+                    <label class="field"><span>负向输入框名（可选）</span><n-input v-model:value="r.negative_field" size="small" /></label>
+                  </div>
+                </div>
+              </n-card>
+            </div>
+          </n-spin>
+        </n-tab-pane>
+      </n-tabs>
 
       <!-- 详情抽屉 -->
       <n-drawer v-model:show="detailShow" :width="560" placement="right">
@@ -473,7 +876,6 @@ onUnmounted(() => {
 
             <div class="sect">创作简报</div>
             <div class="brief">{{ briefOf(detail) }}</div>
-
 
             <div class="sect">正向提示词</div>
             <n-input :value="detail.prompt" type="textarea" readonly :autos="{ minRows: 3, maxRows: 8 }" />
@@ -646,6 +1048,57 @@ onUnmounted(() => {
   margin-top: 16px;
   justify-content: center;
 }
+/* ---------- 设置页 ---------- */
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 6px;
+}
+.fgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 14px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.field.wide {
+  grid-column: 1 / -1;
+}
+.hint {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: rgba(128, 128, 140, 0.95);
+  line-height: 1.6;
+}
+.tmpl {
+  border: 1px solid rgba(190, 190, 205, 0.4);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.dark .tmpl {
+  border-color: rgba(90, 90, 105, 0.55);
+}
+.tmpl-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.row-gap {
+  display: flex;
+  gap: 8px;
+}
+.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+}
 .big-img img {
   max-width: 100%;
   border-radius: 10px;
@@ -675,10 +1128,6 @@ onUnmounted(() => {
   gap: 8px;
   margin-bottom: 6px;
   font-size: 12px;
-}
-.mono {
-  font-family: ui-monospace, monospace;
-  font-size: 11.5px;
 }
 .clickable {
   cursor: pointer;
