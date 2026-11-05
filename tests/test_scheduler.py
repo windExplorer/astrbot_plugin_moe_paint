@@ -83,5 +83,14 @@ check("cap_none_unlimited", scheduler.cap_reached(None, 999) is False)
 check("cap_bad_value_unlimited", scheduler.cap_reached("abc", 5) is False)
 check("cap_string_value", scheduler.cap_reached("4", 4) is True)
 
+# ---------- 远程队列避让 ----------
+check("queue_busy_at_threshold", scheduler.queue_too_busy(2, 2) is True)
+check("queue_busy_above", scheduler.queue_too_busy(5, 2) is True)
+check("queue_busy_below", scheduler.queue_too_busy(1, 2) is False)
+check("queue_busy_off", scheduler.queue_too_busy(9, 0) is False)
+check("queue_busy_unknown", scheduler.queue_too_busy(-1, 2) is False)  # 查询失败按不忙
+check("queue_busy_bad_ahead", scheduler.queue_too_busy("x", 2) is False)
+check("queue_busy_none_threshold", scheduler.queue_too_busy(5, None) is False)
+
 print("scheduler:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

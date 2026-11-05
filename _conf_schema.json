@@ -39,6 +39,12 @@
         "type": "int",
         "default": 2,
         "hint": "查询出图历史的间隔"
+      },
+      "queue_defer_threshold": {
+        "description": "队列避让阈值",
+        "type": "int",
+        "default": 2,
+        "hint": "与萌绘共用服务器时：定时生成提交前查远程队列，前方（排队+执行中）≥ N 个任务就顺延 5 分钟再试，避免顶掉交互出图；0 = 关闭避让。手动「画一张」不受此限制"
       }
     },
     "default": {}

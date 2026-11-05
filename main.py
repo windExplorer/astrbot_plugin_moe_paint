@@ -216,6 +216,21 @@ class MoePaintPlugin(Star):
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    async def remote_queue_ahead(self) -> int:
+        """读远程 /queue 估算前方任务数（排队 + 执行中，与萌绘同口径）。
+
+        供调度循环做提交前避让；查询失败返回 -1（调用方按「不忙」处理，
+        宁试不误停）。手动触发不走避让，只用它算等待预算。
+        """
+        try:
+            client = self._get_client()
+            if client is None:
+                return -1
+            return comfy_client.queue_pending(await client.get_queue())
+        except Exception as e:
+            logger.debug(f"{PLUGIN_TAG} 远程队列查询失败（按不忙处理）: {e}")
+            return -1
+
     # ------------------------------------------------------------------ #
     # LLM
     # ------------------------------------------------------------------ #

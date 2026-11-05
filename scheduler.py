@@ -20,6 +20,9 @@ except Exception:  # 独立测试环境没有 astrbot 运行时，退回标准 l
 # 连续失败多少次后自动暂停（成功即复位）；暂停后管理员可 /绘卷 继续 或 WebUI 恢复
 PAUSE_AFTER_FAILURES = 3
 
+# 远程队列拥塞时的顺延间隔（秒）：先让路给萌绘的交互出图，5 分钟后再试
+DEFER_WAIT_SECONDS = 300
+
 REASON_QUIET = "quiet"
 REASON_BUSY = "busy"
 REASON_DISABLED = "disabled"
@@ -157,6 +160,21 @@ def cap_reached(cap, success_today: int) -> bool:
     return cap > 0 and int(success_today or 0) >= cap
 
 
+def queue_too_busy(ahead: int, threshold: int) -> bool:
+    """远程队列拥塞判定（纯函数）：ahead=-1（查询失败）按不忙处理——宁试不误停；
+    threshold<=0 = 关闭避让。ahead 与 threshold 同口径时用 >=（前方已有 threshold
+    个任务就不再插队）。"""
+    try:
+        ahead = int(ahead)
+    except (TypeError, ValueError):
+        return False
+    try:
+        threshold = int(threshold or 0)
+    except (TypeError, ValueError):
+        threshold = 0
+    return threshold > 0 and ahead >= threshold
+
+
 # --------------------------------------------------------------------------- #
 # 循环壳
 # --------------------------------------------------------------------------- #
@@ -210,6 +228,22 @@ async def run_loop(plugin) -> None:
                     )
                     logger.info(f"[萌萌绘卷] {state.last_run_note}")
                     continue
+                # 远程队列避让：与萌绘共用同一台 ComfyUI 时，提交前先看远程
+                # /queue——前方（排队+执行中）≥ 阈值就顺延 5 分钟再试，别把
+                # 交互出图顶到后面。查询失败按不忙处理（宁试不误停）。
+                defer_threshold = plugin._int_of(
+                    plugin._sub("comfyui"), "queue_defer_threshold", 2, lo=0, hi=100
+                )
+                if defer_threshold > 0:
+                    ahead = await plugin.remote_queue_ahead()
+                    if queue_too_busy(ahead, defer_threshold):
+                        state.next_due = now + timedelta(seconds=DEFER_WAIT_SECONDS)
+                        state.last_run_note = (
+                            f"远程队列繁忙（前方约 {ahead} 个任务），"
+                            f"{DEFER_WAIT_SECONDS // 60} 分钟后再试"
+                        )
+                        logger.info(f"[萌萌绘卷] {state.last_run_note}")
+                        continue
                 summary = await plugin.generate_one(reason="schedule")
                 state.last_run_ts = int(now.timestamp())
                 if summary.get("skipped"):
