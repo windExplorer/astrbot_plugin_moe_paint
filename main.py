@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.4",
+    "v0.7.5",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -491,8 +491,9 @@ class MoePaintPlugin(Star):
         else:
             tag_style = mode
         quality = str(profile.get("quality_prefix") or "") if tag_style == "danbooru" else ""
-        # 跟随萌绘的工作流没法逐条标记能力，用 anima.subject_scope 整体指定（默认按底模推断）
-        scope_cfg = str(acfg.get("subject_scope") or "auto").strip().lower() or "auto"
+        # 逐条可画类型优先；没单独配的回落到整体开关 anima.subject_scope（默认 auto 按底模推断）
+        overrides = workflow_mgr.parse_scope_overrides(acfg.get("workflow_scopes"))
+        scope_cfg = workflow_mgr.workflow_scope_for(chosen, overrides, acfg.get("subject_scope"))
         # 萌绘多条工作流可能共用同一个 base_id，游标必须用工作流自己的 id 才不串位
         wid = str(chosen.get("workflow_id") or "").strip()
         return workflow_mgr.Template(
@@ -1166,7 +1167,7 @@ class MoePaintPlugin(Star):
             return {}
 
     def _category_scopes(self) -> dict:
-        """类别题材能力覆盖（theme.category_scopes，格式「类别=anime|photo|both」）。"""
+        """类别可画类型覆盖（theme.category_scopes，格式「类别=anime|photo|both」）。"""
         try:
             return prompter.parse_scopes(self._sub("theme").get("category_scopes"))
         except Exception as e:

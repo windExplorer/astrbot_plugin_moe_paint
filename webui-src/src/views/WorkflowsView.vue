@@ -83,10 +83,15 @@ const animaProfile = computed({
   get: () => String(cfgGet("anima.prompt_profile", "auto")),
   set: (v: string) => cfgSet("anima.prompt_profile", v),
 });
-/** 跟随萌绘时整体指定题材能力（萌绘工作流没法逐条标）。 */
+/** 跟随萌绘时的整体可画类型：逐条没配的回落到它（默认 auto = 按底模推断）。 */
 const animaScope = computed({
   get: () => String(cfgGet("anima.subject_scope", "auto")),
   set: (v: string) => cfgSet("anima.subject_scope", v),
+});
+/** 逐条可画类型：「名字或id=auto|anime|photo|both」，逗号分隔；空 = 回落到整体值。 */
+const animaScopesText = computed({
+  get: () => String(cfgGet("anima.workflow_scopes", "")),
+  set: (v: string) => cfgSet("anima.workflow_scopes", v),
 });
 const selectionMode = computed({
   get: () => String(cfgGet("workflow_selection", "random")),
@@ -112,13 +117,18 @@ const profileOptions = [
   ...styleOptions,
 ];
 const scopeOptions = [
-  { label: "自动（按底模推断）", value: "auto" },
-  { label: "动漫 · 只画二次元题材", value: "anime" },
-  { label: "真人 · 只画写真题材", value: "photo" },
-  { label: "通吃 · 不限制题材", value: "both" },
+  { label: "自动判断（推荐，按底模推断）", value: "auto" },
+  { label: "只画动漫（二次元）", value: "anime" },
+  { label: "只画真人（写实）", value: "photo" },
+  { label: "两者皆可（不限制）", value: "both" },
+];
+/** 逐条可画类型下拉：空 = 不单独设置，回落到整体值。 */
+const perScopeOptions = [
+  { label: "跟随整体设置", value: "" },
+  ...scopeOptions,
 ];
 const SCOPE_LABEL: Record<string, string> = {
-  anime: "动漫", photo: "真人", both: "通吃", auto: "自动",
+  anime: "只画动漫", photo: "只画真人", both: "两者皆可", auto: "自动判断",
 };
 const presetOptions = [
   { label: "跟随工作流（用 latent 默认尺寸）", value: "follow" },
@@ -243,6 +253,7 @@ async function saveSource() {
       "anima.size_preset",
       "anima.prompt_profile",
       "anima.subject_scope",
+      "anima.workflow_scopes",
     ],
     "工作流来源",
   );
@@ -284,6 +295,35 @@ async function resetPicks() {
 
 /** 名单是否显式固定：空名单 = 跟随萌绘列表顺序，此时不能在这边排序。 */
 const animaPinned = computed(() => animaPicked.value.length > 0);
+
+function parseScopesText(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of String(raw || "").split(/[,，;；\n\r]+/)) {
+    const m = part.match(/^\s*([^=：:]+?)\s*[=：:]\s*(.+?)\s*$/);
+    if (!m) continue;
+    const v = m[2].trim().toLowerCase();
+    if (["auto", "anime", "photo", "both"].includes(v)) out[m[1].trim()] = v;
+  }
+  return out;
+}
+
+const scopeMap = computed(() => parseScopesText(animaScopesText.value));
+
+function scopeOf(name: string): string {
+  return scopeMap.value[name] || "";
+}
+
+function setScopeOf(name: string, v: string) {
+  const m = { ...scopeMap.value };
+  if (!v) delete m[name];
+  else m[name] = v;
+  animaScopesText.value = Object.entries(m).map(([k, val]) => `${k}=${val}`).join(",");
+}
+
+/** 后端算出的实际生效类型（逐条覆盖 + 整体回落后，再由底模推断的结果）。 */
+function effectiveScopeOf(name: string): string {
+  return rotation.value.items.find((x) => x.name === name)?.scope || "both";
+}
 
 function movePick(name: string, delta: number) {
   const list = animaEffective.value.slice();
@@ -461,7 +501,7 @@ function effHint(r: TmplRow): string {
   if (p.label) bits.push(`底模画像 ${p.label}`);
   bits.push(`提示词 ${r.eff_style || r.tag_style}`);
   bits.push(`尺寸 ${r.eff_preset || r.size_preset}`);
-  bits.push(`题材能力 ${SCOPE_LABEL[r.eff_scope || r.subject_scope] || "自动"}`);
+  bits.push(`可画类型 ${SCOPE_LABEL[r.eff_scope || r.subject_scope] || "自动判断"}`);
   if (r.quality_prefix) bits.push("自动加质量词");
   return bits.join(" · ");
 }
@@ -601,9 +641,9 @@ onMounted(reloadAll);
             <span class="mp-sub">自动 = 萌绘底模库判定优先，其次看底模文件名</span>
           </label>
           <label class="mp-field">
-            <span class="label">题材能力</span>
+            <span class="label">可画类型（整体默认）</span>
             <n-select v-model:value="animaScope" :options="scopeOptions" size="small" />
-            <span class="mp-sub">自动 = 按各条底模推断能画动漫还是真人；也可整体强制指定</span>
+            <span class="mp-sub">没在下面「轮换顺序」里逐条设置的工作流，都用这个值</span>
           </label>
         </div>
         <div class="mp-row" style="margin-top: 10px">
@@ -625,10 +665,25 @@ onMounted(reloadAll);
             {{ animaPinned
               ? "名单从上到下就是出图顺序，用 ↑↓ 调整后点「保存」。"
               : "当前未显式选择，按萌绘列表顺序参与；点右上按钮固定成名单后即可排序。" }}
+            每行还能单独设「可画类型」；选「跟随整体设置」即用上面的整体默认（默认按底模自动判断）。
           </div>
           <div v-for="(n, idx) in animaEffective" :key="n" class="order-row">
             <span class="mp-mono">#{{ idx + 1 }}</span>
-            <b>{{ n }}</b>
+            <b class="order-name">{{ n }}</b>
+            <n-select
+              :value="scopeOf(n)"
+              :options="perScopeOptions"
+              size="tiny"
+              class="scope-select"
+              @update:value="(v: string) => setScopeOf(n, v)"
+            />
+            <n-tag
+              size="tiny"
+              :bordered="false"
+              :type="effectiveScopeOf(n) === 'anime' ? 'info' : effectiveScopeOf(n) === 'photo' ? 'warning' : 'default'"
+            >
+              生效 {{ SCOPE_LABEL[effectiveScopeOf(n)] || effectiveScopeOf(n) }}
+            </n-tag>
             <div class="spacer"></div>
             <n-button size="tiny" quaternary :disabled="!animaPinned || idx === 0" @click="movePick(n, -1)">↑</n-button>
             <n-button size="tiny" quaternary :disabled="!animaPinned || idx === animaEffective.length - 1" @click="movePick(n, 1)">↓</n-button>
@@ -717,9 +772,9 @@ onMounted(reloadAll);
           <n-select v-model:value="upProfile" :options="profileOptions" size="small" />
         </label>
         <label class="mp-field">
-          <span class="label">题材能力（能画什么）</span>
+          <span class="label">可画类型（真人 / 动漫 / 两者皆可）</span>
           <n-select v-model:value="upScope" :options="scopeOptions" size="small" />
-          <span class="mp-sub">动漫底模别选「真人」，否则会被派去画写真</span>
+          <span class="mp-sub">动漫底模别选「只画真人」，否则会被派去画写真；一般保持「自动判断」</span>
         </label>
         <label class="mp-field">
           <span class="label">尺寸预设</span>
@@ -835,9 +890,9 @@ onMounted(reloadAll);
             <span class="mp-sub">自动 = 按底模文件名判断风格与尺寸</span>
           </label>
           <label class="mp-field">
-            <span class="label">题材能力（能画什么）</span>
+            <span class="label">可画类型（真人 / 动漫 / 两者皆可）</span>
             <n-select v-model:value="r.subject_scope" :options="scopeOptions" size="small" />
-            <span class="mp-sub">抽签时只从能力匹配的类别里挑，避免动漫工作流抽到写真</span>
+            <span class="mp-sub">抽签时只派匹配的题材，避免动漫工作流被派去画写真；它不改提示词语言，也不给底模加能力</span>
           </label>
           <label class="mp-field">
             <span class="label">尺寸预设</span>
@@ -1155,5 +1210,16 @@ onMounted(reloadAll);
   padding: 5px 0;
   border-top: 1px solid var(--mp-line);
   font-size: 12px;
+}
+.order-name {
+  min-width: 90px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scope-select {
+  width: 172px;
+  flex: 0 0 172px;
 }
 </style>

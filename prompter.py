@@ -120,7 +120,7 @@ CATEGORY_STYLE_GROUP: dict[str, str] = {
     "人物肖像": "photo",
 }
 
-# 题材能力：类别需要什么类型的底模。未列出的类别一律 both。
+# 可画类型：类别需要什么类型的底模。未列出的类别一律 both。
 # anime = 只能由动漫系底模画（角色、二次元少女）；photo = 只能由写实底模画（写真、肖像）。
 CATEGORY_SCOPE: dict[str, str] = {
     "美少女": "anime",
@@ -173,7 +173,7 @@ def style_pool_for(category: str) -> list:
 
 
 def scope_of(category: str, scopes: dict | None = None) -> str:
-    """类别 → 题材能力（配置 theme.category_scopes 可覆盖内置映射）。"""
+    """类别 → 可画类型（配置 theme.category_scopes 可覆盖内置映射）。"""
     v = str((scopes or {}).get(category) or CATEGORY_SCOPE.get(category, "both")).strip().lower()
     return v if v in SCOPES_VALID else "both"
 

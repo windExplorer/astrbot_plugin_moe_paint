@@ -486,7 +486,7 @@ export interface PromptPreviewPayload {
   persona_enabled: boolean;
 }
 
-/** 内置词池全貌（题材 / 风格组 / 题材能力 / 四个附加层）。 */
+/** 内置词池全貌（题材 / 风格组 / 可画类型 / 四个附加层）。 */
 export function apiThemePool() {
   return apiGet<ThemePoolPayload>("/theme/pool", 15000);
 }

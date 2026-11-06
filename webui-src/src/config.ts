@@ -51,6 +51,7 @@ export const KNOWN_KEYS = new Set<string>([
   "anima.size_preset",
   "anima.prompt_profile",
   "anima.subject_scope",
+  "anima.workflow_scopes",
   "workflow_source",
   "workflow_selection",
   "rotation_manual_advances",

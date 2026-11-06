@@ -103,6 +103,7 @@ def main() -> int:
         ("anima", "size_preset"),
         ("anima", "prompt_profile"),
         ("anima", "subject_scope"),
+        ("anima", "workflow_scopes"),
         ("workflow_source",),
         ("rotation_manual_advances",),
         ("delivery", "sessions"),

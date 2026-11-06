@@ -331,5 +331,35 @@ with tempfile.TemporaryDirectory() as td:
           and workflow_mgr.template_key(kt) == "local:a.json", kt.key)
     check("load_template_public_key", kt.to_public().get("key") == "local:a.json")
 
+# ---------- v0.7.5：逐条可画类型（跟随萌绘） ----------
+check("parse_scope_overrides_basic",
+      workflow_mgr.parse_scope_overrides("写实人像=photo, 二次元=anime\n通用=both")
+      == {"写实人像": "photo", "二次元": "anime", "通用": "both"})
+check("parse_scope_overrides_cn_colon",
+      workflow_mgr.parse_scope_overrides("A：anime；B：photo") == {"A": "anime", "B": "photo"})
+check("parse_scope_overrides_bad_dropped",
+      workflow_mgr.parse_scope_overrides("A=bogus,B=ANIME,=photo,C=") == {"B": "anime"})
+check("parse_scope_overrides_dict",
+      workflow_mgr.parse_scope_overrides({"A": "photo", "B": "x"}) == {"A": "photo"})
+check("parse_scope_overrides_empty", workflow_mgr.parse_scope_overrides("") == {})
+
+ch = {"name": "写实人像", "workflow_id": "wf_1"}
+ov = {"写实人像": "photo"}
+check("workflow_scope_by_name", workflow_mgr.workflow_scope_for(ch, ov, "auto") == "photo")
+check("workflow_scope_by_id",
+      workflow_mgr.workflow_scope_for({"name": "x", "workflow_id": "wf_1"},
+                                     {"wf_1": "anime"}, "auto") == "anime")
+check("workflow_scope_fallback",
+      workflow_mgr.workflow_scope_for({"name": "其它"}, ov, "photo") == "photo")
+check("workflow_scope_fallback_auto",
+      workflow_mgr.workflow_scope_for({"name": "其它"}, {}, "") == "auto")
+check("workflow_scope_bad_fallback",
+      workflow_mgr.workflow_scope_for({"name": "其它"}, {}, "xxx") == "auto")
+check("workflow_scope_empty_chosen",
+      workflow_mgr.workflow_scope_for({}, ov, "both") == "both")
+check("workflow_scope_resolved",
+      workflow_mgr.resolve_scope(
+          workflow_mgr.workflow_scope_for({"name": "其它"}, {}, "auto"), "anime") == "anime")
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

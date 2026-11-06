@@ -110,7 +110,7 @@ def guess_profile(model_file: str, model_class: str = "") -> dict:
     return out
 
 
-# 题材能力：底模家族 → 它能画什么。动漫系画不出照片、写实系画不出二次元角色；
+# 可画类型：底模家族 → 它能画什么。动漫系画不出照片、写实系画不出二次元角色；
 # Flux / Qwen / SD3 是通用底模，两种都行；认不出来时不设限制（宁可让用户手填）。
 _SCOPE_BY_FAMILY: dict = {
     "anime": "anime",
@@ -127,11 +127,54 @@ def scope_for_family(family: str) -> str:
 
 
 def resolve_scope(configured: str, family: str) -> str:
-    """模板的 subject_scope + 底模家族 → 生效能力。auto = 按底模推断。"""
+    """模板的 subject_scope + 底模家族 → 生效可画类型。auto = 按底模推断。"""
     v = str(configured or "auto").strip().lower()
     if v in ("anime", "photo", "both"):
         return v
     return scope_for_family(family)
+
+
+def parse_scope_overrides(raw) -> dict:
+    """解析「工作流名或id=auto|anime|photo|both」为映射；非法值丢弃。
+
+    v0.7.5：跟随萌绘时的逐条可画类型配置（anima.workflow_scopes）。
+    兼容中文/英文冒号，逗号 / 分号 / 换行分隔；也接受现成的 dict。
+    """
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        items = []
+        for part in re.split(r"[,，;；\n\r]+", str(raw or "")):
+            if not part.strip():
+                continue
+            for sep in ("=", "：", ":"):
+                if sep in part:
+                    name, _, val = part.partition(sep)
+                    items.append((name, val))
+                    break
+    out: dict[str, str] = {}
+    for name, val in items:
+        key = str(name).strip()
+        v = str(val).strip().lower()
+        if key and v in ("auto", "anime", "photo", "both"):
+            out[key] = v
+    return out
+
+
+def workflow_scope_for(chosen: dict, overrides: dict, fallback: str = "auto") -> str:
+    """单条萌绘工作流的配置可画类型：逐条覆盖优先，未配置回落到整体开关。
+
+    逐条名单可用工作流名或 workflow_id 作键；都没命中才用 fallback
+    （anima.subject_scope，默认 auto = 交给 resolve_scope 按底模推断）。
+    """
+    for key in (
+        str((chosen or {}).get("name") or "").strip(),
+        str((chosen or {}).get("workflow_id") or "").strip(),
+    ):
+        if key and key in (overrides or {}):
+            return overrides[key]
+    v = str(fallback or "auto").strip().lower()
+    return v if v in ("auto", "anime", "photo", "both") else "auto"
 
 
 def _ref_target(ref) -> str:

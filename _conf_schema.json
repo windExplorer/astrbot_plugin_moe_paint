@@ -226,11 +226,17 @@
         "hint": "auto = 按底模自动（萌绘底模库的「提示词风格/danbooru 适配」优先，其次看底模文件名）；其余为强制指定"
       },
       "subject_scope": {
-        "description": "萌绘工作流的题材能力",
+        "description": "可画类型（整体默认值）",
         "type": "string",
         "options": ["auto", "anime", "photo", "both"],
         "default": "auto",
-        "hint": "跟随萌绘的工作流无法逐条标记，用这里整体指定：auto=按各条底模推断；anime=只画动漫题材；photo=只画真人题材；both=不限制"
+        "hint": "跟随萌绘时的整体可画类型：auto=按各条底模推断；anime=只画动漫；photo=只画真人；both=两者皆可。想让某几条单独设置，用下面的「逐条可画类型」"
+      },
+      "workflow_scopes": {
+        "description": "逐条可画类型（跟随萌绘）",
+        "type": "text",
+        "default": "",
+        "hint": "格式「工作流名或id=auto|anime|photo|both」，逗号或换行分隔；在控制台「工作流模板」页的「轮换顺序」列表里逐条选即可自动生成。没单独设置的回落到上面的整体值"
       }
     },
     "default": {}
@@ -287,11 +293,11 @@
         "hint": "auto=按工作流里的底模文件名自动判断提示词风格与尺寸（认不出才用上面的手填值）；其余为强制指定"
       },
       "subject_scope": {
-        "description": "题材能力（能画什么）",
+        "description": "可画类型（真人 / 动漫 / 两者皆可）",
         "type": "string",
         "options": ["auto", "anime", "photo", "both"],
         "default": "auto",
-        "hint": "auto=按底模推断（动漫底模只能画动漫、写实底模只能画真人、Flux/Qwen 等通吃）；也可强制指定。抽签时只从能力匹配的类别里挑，避免「动漫工作流抽到写真」"
+        "hint": "auto=按底模推断（动漫底模只画动漫、写实底模只画真人、Flux/Qwen 等两者皆可）；也可强制指定。抽签时只从匹配的题材类别里挑，避免「动漫工作流抽到写真」。注意：它管的是派什么题材，不是提示词语言，也不会给底模加能力"
       },
       "size_preset": {
         "description": "尺寸预设（auto 识别到底模时会被覆盖）",
@@ -374,10 +380,10 @@
         "hint": "格式「类别=权重」，逗号分隔；没写到的类别按 1 算，权重 0 = 不抽（也可以直接用上面的停用）。默认偏向少女题材，写真与角色类保底参与"
       },
       "category_scopes": {
-        "description": "类别题材能力覆盖",
+        "description": "类别可画类型覆盖",
         "type": "string",
         "default": "",
-        "hint": "格式「类别=anime|photo|both」，逗号分隔。内置已标好（动漫角色只走动漫工作流、写真摄影只走真人工作流）；只给自定义类别或想改内置标记时才需要写"
+        "hint": "格式「类别=anime|photo|both」，逗号分隔。内置已标好（动漫角色只交给能画动漫的工作流、写真摄影只交给能画真人的工作流）；只给自定义类别或想改内置标记时才需要写。方向和工作流的「可画类型」相反：这里是给题材标它需要什么底模"
       },
       "character_names": {
         "description": "角色名单（可删改）",

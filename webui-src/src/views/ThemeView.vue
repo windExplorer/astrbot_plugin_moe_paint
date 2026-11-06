@@ -18,7 +18,9 @@ const SAVE_KEYS = [
   "theme.character_names",
 ];
 const LAYER_KEYS = ["风格", "光色", "氛围", "构图"];
-const SCOPE_LABEL: Record<string, string> = { anime: "动漫工作流", photo: "真人工作流", both: "通吃" };
+const SCOPE_LABEL: Record<string, string> = {
+  anime: "只画动漫", photo: "只画真人", both: "两者皆可",
+};
 const STYLE_LABEL: Record<string, string> = { anime: "动漫风格池", photo: "摄影风格池", all: "全局风格池" };
 const GIRL_CATS = new Set(["美少女", "动漫少女", "真人少女", "写真摄影", "动漫角色", "游戏角色"]);
 
@@ -57,7 +59,7 @@ const characterNames = computed<string>({
   set: (s: string) => cfgSet("theme.character_names", s),
 });
 
-/** 能力覆盖文本 → map（与后端 prompter.parse_scopes 同语义）。 */
+/** 可画类型覆盖文本 → map（与后端 prompter.parse_scopes 同语义）。 */
 const scopesMap = computed<Record<string, string>>(() => {
   const out: Record<string, string> = {};
   for (const part of scopesText.value.split(/[,，;；\n\r]+/)) {
@@ -213,9 +215,9 @@ onMounted(reload);
         展开 = 看内置题材并追加自己的词。
       </div>
       <div class="mp-hint" style="margin-top: 8px">
-        能力标签说明该类别会落在哪种工作流上：<b>动漫工作流</b>只画二次元题材，
-        <b>真人工作流</b>只画写真题材，<b>通吃</b>不限。这样动漫底模不会被派去画泳装写真、
-        二次元角色也不会被塞给写实底模。
+        「可画类型」标签说明该题材会交给哪种工作流：<b>只画动漫</b>只交给动漫底模，
+        <b>只画真人</b>只交给写实底模，<b>两者皆可</b>不限。这样动漫底模不会被派去画泳装写真、
+        二次元角色也不会被塞给写实底模。工作流那边的「可画类型」在「工作流模板」页设置。
       </div>
     </div>
 
@@ -285,7 +287,7 @@ onMounted(reload);
             />
           </label>
           <div class="mp-hint" style="margin-top: 8px">
-            能力：{{ SCOPE_LABEL[r.scope] }}。想改这个标记，去下面「高级」里的「类别能力覆盖」写
+            可画类型：{{ SCOPE_LABEL[r.scope] }}。想改这个标记，去下面「高级」里的「类别可画类型覆盖」写
             <code class="mp-mono">{{ r.name }}=anime|photo|both</code>。
           </div>
         </div>
@@ -316,7 +318,7 @@ onMounted(reload);
     <!-- 高级 -->
     <div class="mp-card">
       <div class="mp-card-head">
-        <div class="mp-card-title">高级：其余 4 层与能力覆盖</div>
+        <div class="mp-card-title">高级：其余 4 层与可画类型覆盖</div>
         <n-button size="small" type="primary" :loading="!!saving['主题词池']" @click="save">保存本页</n-button>
       </div>
       <div class="mp-hint" style="margin-bottom: 10px">
@@ -334,7 +336,7 @@ onMounted(reload);
           />
         </label>
         <label class="mp-field mp-field--wide">
-          <span class="label">类别能力覆盖（类别=anime|photo|both，逗号分隔）</span>
+          <span class="label">类别可画类型覆盖（类别=anime|photo|both，逗号分隔）</span>
           <n-input
             v-model:value="scopesText"
             type="textarea" :rows="2" size="small" class="mp-mono"

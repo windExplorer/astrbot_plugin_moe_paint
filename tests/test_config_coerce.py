@@ -52,7 +52,7 @@ FRONTEND_KEYS = [
     "schedule.daily_times", "schedule.quiet_enabled", "schedule.quiet_hours",
     "schedule.max_per_day",
     "anima.follow_server", "anima.server_key", "anima.workflow", "anima.size_preset",
-    "anima.prompt_profile", "anima.subject_scope",
+    "anima.prompt_profile", "anima.subject_scope", "anima.workflow_scopes",
     "rotation_manual_advances",
     "theme.disabled_categories", "theme.extra_words", "theme.category_weights",
     "theme.category_scopes", "theme.character_names",
