@@ -551,5 +551,70 @@ check("char_none_noop", prompter.apply_character({"prompt": "a", "negative": ""}
 a_char = prompter.parse_draw_args("少女 --char 初音未来")
 check("args_char", a_char["char"] == "初音未来" and a_char["theme"] == "少女", str(a_char))
 
+# ---------- v0.7.10：主体类型 / 动物反拟人 / 人物近景 ----------
+check("kind_person", prompter.subject_kind("动漫少女", "窗边的少女") == "person")
+check("kind_animal", prompter.subject_kind("自然生态", "竹林间回望的赤狐") == "animal")
+check("kind_animal_no_word", prompter.subject_kind("自然生态", "苔藓与蘑菇的微距世界") == "other")
+check("kind_scene", prompter.subject_kind("风景场景", "雪山") == "other")
+check("kind_custom_animal_cat",
+      prompter.subject_kind("萌宠", "柴犬在雪地", animal_cats={"萌宠"}) == "animal")
+check("kind_not_animal_cat", prompter.subject_kind("萌宠", "柴犬在雪地") == "other")
+
+pend = {"prompt": "1girl, cat", "negative": "lowres"}
+pa = prompter.apply_subject(pend, {"category": "自然生态", "subject": "竹林间的赤狐"}, "danbooru")
+check("animal_tag_front", pa["prompt"].startswith("animal focus, no humans"), pa["prompt"])
+check("animal_neg_furry", "furry" in pa["negative"] and "humanoid" in pa["negative"], pa["negative"])
+check("animal_guard_off", "furry" not in prompter.apply_subject(
+    {"prompt": "fox", "negative": ""}, {"category": "自然生态", "subject": "赤狐"},
+    "danbooru", {"animal_guard": False})["negative"])
+pa_zh = prompter.apply_subject(
+    {"prompt": "一只狐狸", "negative": ""}, {"category": "自然生态", "subject": "赤狐"}, "natural"
+)
+check("animal_neg_zh", "福瑞" in pa_zh["negative"] and "一只狐狸" == pa_zh["prompt"], str(pa_zh))
+
+pp = prompter.apply_subject(
+    {"prompt": "1girl, window", "negative": ""}, {"category": "动漫少女", "subject": "少女"}, "danbooru"
+)
+check("person_detail_tags", "detailed face" in pp["prompt"], pp["prompt"])
+check("person_bg_negative", "busy background" in pp["negative"], pp["negative"])
+check("person_detail_off", "detailed face" not in prompter.apply_subject(
+    {"prompt": "1girl", "negative": ""}, {"category": "动漫少女"}, "danbooru",
+    {"person_detail": False, "person_closeup": False})["prompt"])
+
+# 构图池：人物偏近景；非人物仍是十项
+only_person = set(prompter.CATEGORIES) - {"动漫少女"}
+comp_names = {c[0] for c in prompter.PERSON_COMPOSITIONS}
+comps = {
+    prompter.draw_brief(random.Random(s), disabled_categories=only_person)["composition"]
+    for s in range(60)
+}
+check("person_comp_subset", comps <= comp_names, str(comps))
+check("person_comp_portrait_majority",
+      sum(1 for s in range(60)
+          if prompter.draw_brief(random.Random(s), disabled_categories=only_person)["orientation"] == "portrait") >= 45)
+only_animal = set(prompter.CATEGORIES) - {"自然生态"}
+kinds = {
+    prompter.draw_brief(random.Random(s), disabled_categories=only_animal,
+                        animal_cats={"自然生态"})["subject_kind"]
+    for s in range(60)
+}
+check("animal_kinds", kinds <= {"animal", "other"} and "animal" in kinds, str(kinds))
+
+b_animal = prompter.draw_brief(random.Random(3), disabled_categories=only_animal,
+                               animal_cats={"自然生态"})
+if b_animal.get("subject_kind") == "animal":
+    check("brief_animal_note", "非拟人" in (b_animal.get("species_note") or ""), str(b_animal))
+    check("brief_text_kind", "主体=动物" in prompter.brief_text(b_animal), prompter.brief_text(b_animal))
+
+sys_animal = prompter.build_system_prompt("danbooru", {}, "anime", subject_kind="animal")
+check("sys_animal_rule", "animal focus" in sys_animal and "furry" in sys_animal, sys_animal[-400:])
+check("sys_animal_rule_override", "animal focus" in prompter.build_system_prompt(
+    "danbooru", {"override_danbooru": "自定义"}, "both", subject_kind="animal"))
+check("sys_animal_rule_off", "animal focus" not in prompter.build_system_prompt(
+    "danbooru", {"animal_guard": False}, "both", subject_kind="animal"))
+sys_person = prompter.build_system_prompt("danbooru", {}, "anime", subject_kind="person")
+check("sys_person_rule", "close-up" in sys_person, sys_person[-300:])
+check("sys_kind_none", "animal focus" not in prompter.build_system_prompt("danbooru", {}, "both"))
+
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

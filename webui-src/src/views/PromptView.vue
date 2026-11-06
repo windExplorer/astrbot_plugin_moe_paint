@@ -30,6 +30,10 @@ const PROMPT_KEYS = [
   "prompt.ab_enabled",
   "prompt.ab_a",
   "prompt.ab_b",
+  "prompt.animal_guard",
+  "prompt.animal_categories",
+  "prompt.person_closeup",
+  "prompt.person_detail",
 ];
 
 /** 画风硬锚定总开关（关掉则退回「可画类型只筛题材」的旧行为）。 */
@@ -287,6 +291,58 @@ onMounted(async () => {
             @update:value="(v: number | null) => set('prompt.max_tags', v ?? 75)"
           />
           <span class="mp-sub">SD1.5 只有 77 token，超出部分不生效</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- 主体收口 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">主体收口（动物 / 人物取景）</div>
+        <n-button size="small" type="primary" :loading="!!saving['提示词']" @click="save">保存本页</n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        动物题材的常见翻车是「画成福瑞」——动漫底模对人物有极强先验，光靠文字描述压不住，
+        所以这里会硬加 <code>animal focus, no humans</code> 和一整串反向词。
+        人物题材则默认偏近景（特写 / 半身像），面部与皮肤细节优先、背景次要。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">动物禁止拟人</span>
+          <n-switch
+            :value="cfgBool('prompt.animal_guard', true)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.animal_guard', v)"
+          />
+          <span class="mp-sub">humanoid / anthro / furry / 人脸人手 / 穿衣 / 直立</span>
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">动物题材类别（逗号分隔）</span>
+          <n-input
+            :value="String(cfgGet('prompt.animal_categories', '自然生态'))"
+            size="small"
+            placeholder="自然生态"
+            @update:value="(v: string) => set('prompt.animal_categories', v)"
+          />
+          <span class="mp-sub">只在这些类别里且题材确实提到动物时才套护栏（蘑菇苔藓微距不算）</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">人物偏近景</span>
+          <n-switch
+            :value="cfgBool('prompt.person_closeup', true)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.person_closeup', v)"
+          />
+          <span class="mp-sub">构图池改为 特写×2 / 半身×2 / 中景×1 / 全身×1</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">人物细节优先</span>
+          <n-switch
+            :value="cfgBool('prompt.person_detail', true)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.person_detail', v)"
+          />
+          <span class="mp-sub">加 detailed face / eyes / skin，背景压简单</span>
         </label>
       </div>
     </div>

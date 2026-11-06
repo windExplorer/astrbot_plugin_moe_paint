@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.9",
+    "v0.7.10",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -752,7 +752,10 @@ class MoePaintPlugin(Star):
         # 工作流可画类型必须一路传到提示词：系统提示词的画风硬规则 + 出图后的
         # 硬拼接标签，两处都要用同一个值，否则又会「设了只画动漫却画出真人」。
         scope = str(getattr(tpl, "scope", "both") or "both")
-        sys_prompt = prompter.build_system_prompt(tpl.tag_style, opts, scope, phase=phase)
+        sys_prompt = prompter.build_system_prompt(
+            tpl.tag_style, opts, scope, phase=phase,
+            subject_kind=str(brief.get("subject_kind") or ""),
+        )
         ab_text = str(ab_text or "").strip()
         if ab_text:
             sys_prompt = sys_prompt.rstrip() + "\n【本轮附加规则】\n" + ab_text + "\n"
@@ -776,6 +779,8 @@ class MoePaintPlugin(Star):
             out = prompter.normalize_payload(payload, tpl.tag_style, opts)
             out = prompter.apply_persona(out, tpl.tag_style, brief, opts, scope)
             out = prompter.apply_character(out, char, tpl.tag_style)
+            # 主体收口（v0.7.10）：动物加 animal focus + 反拟人词；人物加细节词
+            out = prompter.apply_subject(out, brief, tpl.tag_style, opts)
             out["prompt"] = prompter.apply_quality_prefix(out.get("prompt", ""), quality)
             out = prompter.apply_negative_base(out, tpl.tag_style, opts)
             out["_tag_count"] = len(prompter.split_tag_list(out.get("prompt", "")))
@@ -839,6 +844,7 @@ class MoePaintPlugin(Star):
                 self._templates, mode, _PICK_RANDOM, last_key, legacy
             )
             phase = self.current_phase()
+            popts = self._prompt_opts()
             brief = prompter.draw_brief(
                 _PICK_RANDOM,
                 disabled_categories=self._disabled_categories(),
@@ -847,6 +853,8 @@ class MoePaintPlugin(Star):
                 scope=getattr(tpl, "scope", "both"),
                 scopes=self._category_scopes(),
                 phase=phase if self._light_sync() else "",
+                person_closeup=config_coerce.truthy(popts.get("person_closeup", True), True),
+                animal_cats=set(prompter.split_tag_list(popts.get("animal_categories"))),
             )
             args = prompter.parse_draw_args(theme)
             if args["theme"]:
@@ -862,6 +870,7 @@ class MoePaintPlugin(Star):
             out["brief"] = brief
             out["phase"] = phase
             out["character"] = str((char or {}).get("name") or "")
+            out["subject_kind"] = str(brief.get("subject_kind") or "")
             tag_style = tpl.tag_style if tpl else "danbooru"
             out["tag_style"] = tag_style
             out["scope"] = str(getattr(tpl, "scope", "both") or "both")
@@ -1594,6 +1603,7 @@ class MoePaintPlugin(Star):
             self.debug_log("generate", f"指令参数有误（该部分已忽略）：{args['error']}")
         # 时段（时间一致性关掉时返回空串，行为与旧版一致）
         phase = self.current_phase()
+        popts = self._prompt_opts()
         brief = prompter.draw_brief(
             _PICK_RANDOM,
             disabled_categories=self._disabled_categories(),
@@ -1602,6 +1612,9 @@ class MoePaintPlugin(Star):
             scope=getattr(tpl, "scope", "both"),
             scopes=self._category_scopes(),
             phase=phase if self._light_sync() else "",
+            # v0.7.10：人物偏近景；动物类别可扩（自然生态默认在内）
+            person_closeup=config_coerce.truthy(popts.get("person_closeup", True), True),
+            animal_cats=set(prompter.split_tag_list(popts.get("animal_categories"))),
         )
         if args["theme"]:
             brief["category"] = "自定义"

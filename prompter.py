@@ -140,6 +140,144 @@ PERSON_CATEGORIES: set[str] = {
     "美少女", "动漫少女", "真人少女", "写真摄影", "动漫角色", "游戏角色",
 }
 
+# --------------------------------------------------------------------------- #
+# 主体类型收口（v0.7.10）
+#
+# 两个真实反馈：
+# ① 「画动物变成福瑞」：动漫底模对「人形主体」有极强先验，只写「赤狐」很容易被
+#    画成兽人/兽耳娘/福瑞。光靠简报描述不够，必须给 `animal focus, no humans`
+#    这类硬标签 + 一整套反向词（humanoid / anthro / furry / human face…）。
+# ② 「画人要多近景、多细节、背景次要」：原来构图是从 10 项里均匀抽，一半是横幅
+#    远景，人物只占一小块。人物题材应当默认偏特写/半身，并补面部皮肤细节词。
+# --------------------------------------------------------------------------- #
+
+ANIMAL_CATEGORIES: set[str] = {"自然生态"}
+
+# 判断题材是不是「真动物」：自然生态里也有蘑菇/苔藓/花草这类微距题材，
+# 无脑套 animal focus 反而会画错。
+ANIMAL_WORDS = (
+    "狐", "犬", "狗", "猫", "狼", "虎", "狮", "豹", "熊", "马", "鹿", "兔", "鼠",
+    "牛", "羊", "猪", "猴", "象", "鸟", "雀", "鸡", "鸭", "鹅", "鹰", "鸥", "鹤",
+    "企鹅", "蛙", "鱼", "鲨", "鲸", "豚", "龟", "蛇", "虫", "蜂", "蝶", "蛾",
+    "水母", "海星", "虾", "蟹", "珊瑚", "蜗牛", "松鼠", "浣熊", "树懒", "獭",
+)
+
+ANIMAL_TAGS_DANBOORU = "animal focus, no humans"
+ANIMAL_NEG_DANBOORU = (
+    "human, humanoid, anthro, furry, kemono, personification, human face, "
+    "human hands, clothes, standing on two legs, 1girl, 1boy"
+)
+ANIMAL_NEG_EN = (
+    "anthropomorphic, furry, kemono, humanoid, human face, personified animal, "
+    "clothed animal, bipedal animal, human hands"
+)
+ANIMAL_NEG_ZH = "拟人化，兽人，福瑞，人形动物，穿衣服的动物，直立行走的动物，长着人脸的动物"
+
+# 人物细节 / 背景虚化（只对 danbooru 硬拼；自然语言靠简报里的取景要求）
+PERSON_DETAIL_TAGS = (
+    "detailed face, beautiful detailed eyes, detailed skin, sharp focus, depth of field"
+)
+PERSON_NEG_EXTRA = "busy background, cluttered background"
+
+# 人物题材的构图权重：特写与半身像各 2 份，中景 1 份，全身像 1 份。
+# 想恢复原来的均匀抽样，把 prompt.person_closeup 关掉即可。
+PERSON_COMPOSITIONS: list[tuple[str, str]] = [
+    ("特写·竖幅", "portrait"),
+    ("特写·竖幅", "portrait"),
+    ("半身像·竖幅", "portrait"),
+    ("半身像·竖幅", "portrait"),
+    ("中景·横幅", "landscape"),
+    ("全身像·竖幅", "portrait"),
+]
+
+KIND_LABEL_ZH = {"animal": "动物（真实形态）", "person": "人物", "other": "景物 / 其他"}
+
+
+def subject_kind(category: str, subject: str = "", animal_cats=None) -> str:
+    """主体类型：person / animal / other。
+
+    只有「动物类别 + 题材里确实有动物词」才算动物：自然生态里的蘑菇苔藓走 other，
+    避免把 micro 题材硬套上 animal focus。
+    """
+    cat = str(category or "")
+    if cat in PERSON_CATEGORIES:
+        return "person"
+    cats = set(ANIMAL_CATEGORIES) | {str(c).strip() for c in (animal_cats or []) if str(c).strip()}
+    if cat in cats:
+        text = str(subject or "")
+        if not text or any(w in text for w in ANIMAL_WORDS):
+            return "animal"
+    return "other"
+
+
+def apply_subject(payload: dict, brief: dict, tag_style: str, opts: dict | None = None) -> dict:
+    """按主体类型补硬标签与反向词（v0.7.10）。
+
+    - 动物：danbooru 前置 `animal focus, no humans`，负向加一整串拟人/福瑞词；
+      自然语言线只加反向词（中文/英文各一套），正文交给 LLM 描述。
+    - 人物：danbooru 追加面部皮肤细节词；`person_closeup` 开着时再压一下杂乱背景。
+    """
+    out = dict(payload or {})
+    opts = opts or {}
+    kind = str(brief.get("subject_kind") or "")
+    if not kind:
+        kind = subject_kind(brief.get("category"), brief.get("subject"))
+    key = _style_key(str(tag_style or ""))
+    if kind == "animal" and opt_bool(opts.get("animal_guard"), True):
+        if key == "danbooru":
+            out["prompt"] = _merge_tags(out.get("prompt", ""), ANIMAL_TAGS_DANBOORU, True)
+            neg = ANIMAL_NEG_DANBOORU
+        elif key == "natural":
+            neg = ANIMAL_NEG_ZH
+        else:
+            neg = ANIMAL_NEG_EN
+        out["negative"] = _merge_tags(out.get("negative", ""), neg, False)
+    elif kind == "person" and opt_bool(opts.get("person_detail"), True):
+        if key == "danbooru":
+            out["prompt"] = _merge_tags(out.get("prompt", ""), PERSON_DETAIL_TAGS, False)
+        if opt_bool(opts.get("person_closeup"), True):
+            out["negative"] = _merge_tags(out.get("negative", ""), PERSON_NEG_EXTRA, False)
+    return out
+
+
+_SUBJECT_RULES: dict[str, dict[str, str]] = {
+    "animal": {
+        "danbooru": (
+            "【主体硬约束·最高优先级】本轮主体是真实动物。prompt 必须以 "
+            "animal focus, no humans 开头，画面里只能有这种动物（可以多只），"
+            "体型与姿态按真实动物画（四足/飞行/游动），不要站直像人。"
+            "禁止 humanoid / anthro / furry / kemono / 兽人 / 兽耳 / 拟人化，"
+            "不要给人脸、人手、人类身材，不要给动物穿衣服或摆人姿势。"
+        ),
+        "natural": (
+            "【主体硬约束·最高优先级】本轮主体是真实动物：按自然姿态描画，"
+            "不要拟人化、不要兽人/福瑞、不要人脸人手、不要给动物穿衣服或让它直立行走。"
+        ),
+        "natural_en": (
+            "[Hard constraint] The subject is a real animal in its natural posture. "
+            "No anthropomorphism, no furry/kemono characters, no human face or hands, "
+            "no clothed or bipedal animal."
+        ),
+    },
+    "person": {
+        "danbooru": (
+            "【取景·优先近景】构图用 close-up / upper body，让人物占满画面；"
+            "细节标签优先写 detailed face, beautiful detailed eyes, detailed skin、"
+            "发丝与服装质感。背景只写一句简单的环境提示（或 simple background / "
+            "blurry background），不要罗列大量背景元素。"
+        ),
+        "natural": (
+            "【取景·优先近景】以特写或半身为主，人物占画面主体，重点写面部、眼神、"
+            "皮肤与服装质感；背景一句带过即可（可虚化），不要大段描写环境。"
+        ),
+        "natural_en": (
+            "[Framing] Prefer a close-up or upper-body shot with the figure filling the "
+            "frame. Emphasize face, eyes, skin and fabric detail; keep the background to "
+            "one short clause (may be blurred)."
+        ),
+    },
+}
+
 SCOPES_VALID = ("anime", "photo", "both")
 
 SCOPE_LABEL_ZH: dict[str, str] = {
@@ -638,6 +776,8 @@ def draw_brief(
     scope: str = "both",
     scopes: dict | None = None,
     phase: str = "",
+    person_closeup: bool = True,
+    animal_cats: "set[str] | None" = None,
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -693,12 +833,16 @@ def draw_brief(
     light = rng.choice(light_pool + extra_lights) if (light_pool or extra_lights) else "自然光"
     mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
 
-    comp_pool = list(COMPOSITIONS)
+    # 主体类型决定构图池（v0.7.10）：人物偏近景，其余仍是十项均匀抽
+    kind = subject_kind(category, subject, animal_cats)
+    extra_comps: list[tuple[str, str]] = []
     for item in _merge_words([], extra.get("构图")):
         # 格式：名称@orientation
         name, _, ori = item.partition("@")
         if name and ori in ("landscape", "portrait", "square"):
-            comp_pool.append((name, ori))
+            extra_comps.append((name, ori))
+    base_comps = PERSON_COMPOSITIONS if (kind == "person" and person_closeup) else COMPOSITIONS
+    comp_pool = list(base_comps) + extra_comps
     comp_name, orientation = rng.choice(comp_pool)
 
     # 镜头 / 媒介层（v0.7.8）：写真线差一口气常常就差「什么镜头」，
@@ -721,7 +865,14 @@ def draw_brief(
         "scope": wf_scope,
         "lens": lens,
         "medium": medium,
+        "subject_kind": kind,
     }
+    # 动物题材要明确「真实形态」，否则底模会往兽人/福瑞上靠
+    if kind == "animal":
+        brief["species_note"] = "真实动物（自然姿态，非拟人、不穿衣服、不直立）"
+        brief["framing"] = "中近景为主，动物占据画面主体"
+    elif kind == "person" and person_closeup:
+        brief["framing"] = "近景优先（特写 / 半身像），人物占满画面，背景次要可虚化"
     if phase:
         brief["phase"] = str(phase)
     return brief
@@ -750,6 +901,13 @@ def brief_text(brief: dict, theme: str = "") -> str:
         text += f"；时段={daylight.phase_label(brief['phase'])}"
     if str(brief.get("character") or "").strip():
         text += f"；角色={brief['character']}"
+    kind = str(brief.get("subject_kind") or "")
+    if kind in KIND_LABEL_ZH:
+        text += f"；主体={KIND_LABEL_ZH[kind]}"
+    if str(brief.get("species_note") or "").strip():
+        text += f"；形态要求={brief['species_note']}"
+    if str(brief.get("framing") or "").strip():
+        text += f"；取景={brief['framing']}"
     return text
 
 
@@ -831,7 +989,8 @@ def opt_bool(v, default: bool = True) -> bool:
 
 
 def build_system_prompt(
-    tag_style: str, opts: dict | None = None, scope: str = "both", phase: str = ""
+    tag_style: str, opts: dict | None = None, scope: str = "both", phase: str = "",
+    subject_kind: str = "",
 ) -> str:
     """按提示词风格 + 工作流可画类型给系统提示词。
 
@@ -841,8 +1000,11 @@ def build_system_prompt(
     - ``persona_enabled`` / ``persona_text`` → 人物锚定规则段；
     - ``extra_rules`` → 用户自定义规则段；
     - ``style_anchor_enabled`` → 是否插入画风硬规则（默认开）。
+
     ``scope`` 为 anime / photo 时追加画风硬规则段；它是插件级硬约束，
     即使完全覆盖系统提示词也照样追加，避免用户改完提示词又画成真人。
+    ``subject_kind``（animal / person）追加主体硬约束（v0.7.10）：动物禁止拟人，
+    人物优先近景与细节 —— 这两条同样是插件级约束，覆盖提示词也照加。
     """
     opts = opts or {}
     key = _style_key(str(tag_style or ""))
@@ -852,6 +1014,19 @@ def build_system_prompt(
         rule = _SCOPE_RULES[sc][key]
     # 时段硬规则（v0.7.9）：与画风规则同级，完全覆盖系统提示词时也照样追加
     time_rule = daylight.rule_for_phase(phase) if phase else ""
+    kind = str(subject_kind or "").strip().lower()
+    subject_rule = ""
+    if kind in _SUBJECT_RULES:
+        # 主体规则跟着开关走：动物护栏/人物细节被关掉时不再强行约束
+        if kind == "animal" and not opt_bool(opts.get("animal_guard"), True):
+            subject_rule = ""
+        elif kind == "person" and not (
+            opt_bool(opts.get("person_detail"), True)
+            or opt_bool(opts.get("person_closeup"), True)
+        ):
+            subject_rule = ""
+        else:
+            subject_rule = _SUBJECT_RULES[kind][key]
 
     override = str(opts.get(f"override_{key}") or "").strip()
     if override:
@@ -861,6 +1036,8 @@ def build_system_prompt(
             override = override.rstrip() + "\n" + rule + "\n"
         if time_rule:
             override = override.rstrip() + "\n" + time_rule + "\n"
+        if subject_rule:
+            override = override.rstrip() + "\n" + subject_rule + "\n"
         return override
 
     body = _SYSTEM_BODIES[key]
@@ -876,6 +1053,8 @@ def build_system_prompt(
         rules.append(rule)
     if time_rule:
         rules.append(time_rule)
+    if subject_rule:
+        rules.append(subject_rule)
     if rules:
         body += "\n【附加规则（优先于以上通用要求）】\n" + "\n".join(rules) + "\n"
     return body + _SYSTEM_COMMON_TAIL

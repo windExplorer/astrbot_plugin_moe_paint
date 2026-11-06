@@ -164,6 +164,30 @@
         "default": "",
         "hint": "另一组规则；与 A 只有一个变量不同才比得出结论"
       },
+      "animal_guard": {
+        "description": "动物题材禁止拟人化",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后动物题材会自动加 animal focus / no humans，并给一整串反向词（humanoid / anthro / furry / 兽人 / 人脸人手 / 穿衣服 / 直立），避免画成福瑞。关掉就退回纯靠文字描述"
+      },
+      "animal_categories": {
+        "description": "动物题材类别",
+        "type": "string",
+        "default": "自然生态",
+        "hint": "逗号分隔。只有这些类别里「题材确实提到动物」时才套动物护栏（自然生态里的蘑菇/苔藓微距不会被当成动物）。自定义类别想画动物也写进来"
+      },
+      "person_closeup": {
+        "description": "人物题材偏近景",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后人物类别的构图从「特写 / 半身像 / 中景 / 全身像」按 2:2:1:1 抽（原来十项均匀抽，一半是横幅远景），约 83% 是竖幅近景；关掉恢复原来的均匀抽样"
+      },
+      "person_detail": {
+        "description": "人物细节优先",
+        "type": "bool",
+        "default": true,
+        "hint": "danbooru 风格会追加 detailed face / beautiful detailed eyes / detailed skin / sharp focus / depth of field，并压掉杂乱背景；自然语言风格改为在简报里要求「人物细节优先、背景一句带过」"
+      },
       "style_anchor_enabled": {
         "description": "启用画风硬锚定",
         "type": "bool",
