@@ -14,14 +14,16 @@ import {
 } from "naive-ui";
 import {
   apiAnimaWorkflows,
+  apiResetRotation,
   apiWorkflows,
   apiWorkflowParse,
   apiWorkflowUpload,
   type AnimaWorkflowPayload,
+  type RotationPayload,
   type TemplatePublic,
   type WorkflowAnalyze,
 } from "../api";
-import { cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
+import { cfgBool, cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { refreshStatus, status } from "../store";
 import { splitNames } from "../utils";
 
@@ -50,11 +52,18 @@ interface TmplRow {
   eff_style?: string;
   eff_preset?: string;
   eff_scope?: string;
+  rotation_no?: number;
 }
+
+const EMPTY_ROTATION: RotationPayload = {
+  mode: "random", ordered: false, total: 0, items: [], next_index: 0,
+  next_name: "", next_key: "", last_key: "", last_found: false, manual_advances: false,
+};
 
 const rows = ref<TmplRow[]>([]);
 const workflowsDir = ref("");
 const animaInfo = ref<AnimaWorkflowPayload | null>(null);
+const rotation = ref<RotationPayload>({ ...EMPTY_ROTATION, items: [] });
 const loading = ref(false);
 
 const source = computed({
@@ -83,10 +92,15 @@ const selectionMode = computed({
   get: () => String(cfgGet("workflow_selection", "random")),
   set: (v: string) => cfgSet("workflow_selection", v),
 });
+/** 手动出图是否占用一个轮换位（默认不占）。 */
+const manualAdvances = computed({
+  get: () => cfgBool("rotation_manual_advances", false),
+  set: (v: boolean) => cfgSet("rotation_manual_advances", v),
+});
 
 const modeOptions = [
   { label: "随机挑一个可用模板", value: "random" },
-  { label: "按顺序轮换（重启续轮）", value: "round_robin" },
+  { label: "按顺序轮换（清单从上到下 · 重启续轮）", value: "round_robin" },
 ];
 const styleOptions = [
   { label: "danbooru（动漫英文标签）", value: "danbooru" },
@@ -167,9 +181,13 @@ function rowsFromCfg() {
   rows.value = Array.isArray(raw) ? raw.map(normalizeRow) : [];
 }
 
-function mergeValidation(templates: TemplatePublic[]) {
+function mergeValidation(templates: TemplatePublic[], rot: RotationPayload) {
   const byKey = new Map(templates.map((t) => [`${t.name}|${t.file}`, t]));
+  // 后端轮换名单里的 file 一定带 .json，清单里手填可能省略，先归一化再对号
+  const norm = (f: string) => (String(f || "").endsWith(".json") ? String(f) : `${f}.json`);
+  const orderByFile = new Map((rot?.items || []).map((i) => [norm(i.file), i.index]));
   for (const r of rows.value) {
+    r.rotation_no = orderByFile.get(norm(r.file)) || 0;
     const t = byKey.get(`${r.name}|${r.file}`);
     if (t) {
       r.ok = t.ok;
@@ -192,7 +210,8 @@ async function reloadAll() {
     rowsFromCfg();
     const w = await apiWorkflows();
     workflowsDir.value = w.workflows_dir || "";
-    mergeValidation(w.templates || []);
+    rotation.value = w.rotation || { ...EMPTY_ROTATION, items: [] };
+    mergeValidation(w.templates || [], rotation.value);
     if (source.value === "anima") {
       animaInfo.value = w.anima || (await apiAnimaWorkflows());
     } else {
@@ -219,6 +238,7 @@ async function saveSource() {
     [
       "workflow_source",
       "workflow_selection",
+      "rotation_manual_advances",
       "anima.workflow",
       "anima.size_preset",
       "anima.prompt_profile",
@@ -262,6 +282,38 @@ async function resetPicks() {
   await saveSource();
 }
 
+/** 名单是否显式固定：空名单 = 跟随萌绘列表顺序，此时不能在这边排序。 */
+const animaPinned = computed(() => animaPicked.value.length > 0);
+
+function movePick(name: string, delta: number) {
+  const list = animaEffective.value.slice();
+  const i = list.indexOf(name);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  animaPicked.value = list;
+}
+
+/** 把「全部可用」固化成显式名单，之后才能上下调整顺序。 */
+function pinOrder() {
+  animaPicked.value = animaUsable.value.map((w) => w.name);
+  message.success("已固定当前顺序，现在可以上下调整；记得点保存");
+}
+
+async function doResetRotation() {
+  try {
+    const r = await apiResetRotation();
+    if (!r?.ok) {
+      message.error("重置失败");
+      return;
+    }
+    message.success("顺序轮换已重置到 #1");
+    await reloadAll();
+  } catch (e: any) {
+    message.error(`重置失败：${e?.message || e}`);
+  }
+}
+
 async function save() {
   const entries = rows.value.map((r) => ({
     name: r.name.trim(),
@@ -298,6 +350,24 @@ function addRow() {
 
 function removeRow(i: number) {
   rows.value.splice(i, 1);
+  renumberLocal();
+}
+
+/** 清单行顺序就是轮换顺序；移动后立刻本地重编号，保存后以后端校验结果为准。 */
+function moveRow(i: number, delta: number) {
+  const j = i + delta;
+  if (j < 0 || j >= rows.value.length) return;
+  const list = rows.value.slice();
+  [list[i], list[j]] = [list[j], list[i]];
+  rows.value = list;
+  renumberLocal();
+}
+
+function renumberLocal() {
+  let n = 0;
+  for (const r of rows.value) {
+    r.rotation_no = r.enabled && r.ok !== false ? ++n : 0;
+  }
 }
 
 // ---------------- 上传 ----------------
@@ -401,6 +471,70 @@ onMounted(reloadAll);
 
 <template>
   <div class="page">
+    <!-- 轮换顺序：放第一屏，直接回答「顺序是什么 / 下一张是谁」 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">轮换顺序</div>
+        <div class="mp-row">
+          <n-tag size="small" :bordered="false" :type="rotation.ordered ? 'info' : 'default'">
+            {{ rotation.ordered ? "顺序轮换" : "随机挑选（无顺序）" }}
+          </n-tag>
+          <n-button size="small" quaternary :loading="loading" @click="reloadAll">刷新</n-button>
+          <n-popconfirm @positive-click="doResetRotation">
+            <template #trigger>
+              <n-button size="small" quaternary :disabled="!rotation.ordered || !rotation.total">
+                从 #1 重置
+              </n-button>
+            </template>
+            清空轮换进度，下一张从 #1 开始？
+          </n-popconfirm>
+        </div>
+      </div>
+
+      <div class="mp-hint" style="margin-bottom: 10px">
+        顺序 = <b>{{ source === "anima" ? "下面「参与名单」从上到下" : "「模板清单」从上到下" }}</b>，
+        只数<b>已启用且校验通过</b>的模板；出图成功才推进，重启续轮。
+        停用或新增模板不会让顺序错位：插件记的是「上一张是谁」，不是第几张。
+      </div>
+
+      <div v-if="!rotation.ordered" class="mp-hint">
+        当前是随机模式，没有固定顺序；把下面「模板轮换」改成「按顺序轮换」即可看到编号。
+      </div>
+      <template v-else>
+        <div v-if="!rotation.total" class="mp-err">没有可用模板（检查启用状态与校验结果）</div>
+        <template v-else>
+          <div class="rot-next">
+            下一张：<b>#{{ rotation.next_index }} {{ rotation.next_name }}</b>
+            <span class="mp-sub">
+              （共 {{ rotation.total }} 张{{ rotation.last_key && !rotation.last_found ? "；上一张已不在名单里，从 #1 重新开始" : "" }}）
+            </span>
+          </div>
+          <div class="rot-chain">
+            <span
+              v-for="it in rotation.items"
+              :key="it.key"
+              class="rot-item"
+              :class="{ next: it.index === rotation.next_index }"
+            >
+              <i>#{{ it.index }}</i>{{ it.name }}
+            </span>
+            <span class="rot-loop mp-sub">↻ 回到 #1</span>
+          </div>
+        </template>
+      </template>
+
+      <div class="switch-row" style="margin-top: 12px">
+        <n-switch v-model:value="manualAdvances" size="small" />
+        <span>手动出图也占一个轮换位</span>
+        <n-button size="small" type="primary" :loading="!!saving['工作流来源']" @click="saveSource">
+          保存开关
+        </n-button>
+        <span class="mp-sub">
+          关闭（默认）：「立即画一张」与 /绘卷 画一张 不推进轮换；失败轮一律不占位
+        </span>
+      </div>
+    </div>
+
     <!-- 来源 -->
     <div class="mp-card">
       <div class="mp-card-head">
@@ -478,6 +612,29 @@ onMounted(reloadAll);
             恢复「全部参与」
           </n-button>
           <span v-if="animaInfo?.error" class="mp-err">{{ animaInfo.error }}</span>
+        </div>
+
+        <div class="order-box">
+          <div class="mp-row">
+            <div class="mp-card-title" style="font-size: 13px">
+              轮换顺序（{{ animaEffective.length }} 条）
+            </div>
+            <n-button v-if="!animaPinned" size="small" @click="pinOrder">固定当前顺序以便排序</n-button>
+          </div>
+          <div class="mp-hint" style="margin: 6px 0">
+            {{ animaPinned
+              ? "名单从上到下就是出图顺序，用 ↑↓ 调整后点「保存」。"
+              : "当前未显式选择，按萌绘列表顺序参与；点右上按钮固定成名单后即可排序。" }}
+          </div>
+          <div v-for="(n, idx) in animaEffective" :key="n" class="order-row">
+            <span class="mp-mono">#{{ idx + 1 }}</span>
+            <b>{{ n }}</b>
+            <div class="spacer"></div>
+            <n-button size="tiny" quaternary :disabled="!animaPinned || idx === 0" @click="movePick(n, -1)">↑</n-button>
+            <n-button size="tiny" quaternary :disabled="!animaPinned || idx === animaEffective.length - 1" @click="movePick(n, 1)">↓</n-button>
+            <n-button size="tiny" quaternary :disabled="!animaPinned" @click="togglePick(n)">移出</n-button>
+          </div>
+          <div v-if="!animaEffective.length" class="mp-sub">没有可用的工作流</div>
         </div>
 
         <div v-if="animaRows.length" class="anima-list">
@@ -615,6 +772,7 @@ onMounted(reloadAll);
       </div>
 
       <div class="mp-hint" style="margin-bottom: 12px">
+        <b>清单从上到下就是顺序轮换的顺序</b>（只数已启用且校验通过的模板），用每行右侧的 ↑↓ 调整，保存后生效。
         节点定位自动完成（沿采样器的 positive / negative / latent_image 引用找）。
         异形链路（CFGGuider、SamplerCustomAdvanced、非 text 输入框）定位失败时才填下面的覆盖项。
       </div>
@@ -623,6 +781,9 @@ onMounted(reloadAll);
 
       <div v-for="(r, i) in rows" :key="i" class="tmpl" :class="{ bad: r.ok === false }">
         <div class="tmpl-head">
+          <n-tag v-if="r.rotation_no && rotation.ordered" size="small" :bordered="false" type="info">
+            轮换 #{{ r.rotation_no }}
+          </n-tag>
           <n-tag size="small" :bordered="false" :type="r.ok === undefined ? 'default' : r.ok ? 'success' : 'error'">
             {{ r.ok === undefined ? "未校验" : r.ok ? "校验通过" : "校验失败" }}
           </n-tag>
@@ -633,6 +794,8 @@ onMounted(reloadAll);
             <span class="mp-sub">启用</span>
             <n-switch v-model:value="r.enabled" size="small" />
           </label>
+          <n-button size="tiny" quaternary :disabled="i === 0" title="上移（提前轮换）" @click="moveRow(i, -1)">↑</n-button>
+          <n-button size="tiny" quaternary :disabled="i === rows.length - 1" title="下移（推后轮换）" @click="moveRow(i, 1)">↓</n-button>
           <n-popconfirm @positive-click="removeRow(i)">
             <template #trigger>
               <n-button size="tiny" type="error" quaternary>移除</n-button>
@@ -932,5 +1095,65 @@ onMounted(reloadAll);
 
 .advanced summary:hover {
   color: var(--mp-accent);
+}
+
+/* v0.7.4 轮换顺序可视化 */
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.rot-next {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.rot-next b {
+  color: var(--mp-accent);
+}
+.rot-chain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rot-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--mp-line);
+  background: var(--mp-panel-soft);
+}
+.rot-item i {
+  font-style: normal;
+  color: var(--mp-sub);
+  font-family: monospace;
+}
+.rot-item.next {
+  border-color: var(--mp-accent);
+  box-shadow: 0 0 0 1px var(--mp-accent) inset;
+}
+.rot-loop {
+  font-size: 11px;
+}
+.order-box {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--mp-line);
+  border-radius: 8px;
+  background: var(--mp-panel-soft);
+}
+.order-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid var(--mp-line);
+  font-size: 12px;
 }
 </style>

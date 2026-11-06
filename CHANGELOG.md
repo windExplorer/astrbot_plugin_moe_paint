@@ -1,5 +1,68 @@
 # 更新日志
 
+## v0.7.4（轮换顺序看得懂也排得动：游标改记「上一张是谁」）
+
+现象：「按照工作流顺序生图，顺序是什么，怎么排序，现在的排序看不懂」。
+
+根因（追完整条链路后确认有六处）：
+
+1. `workflow_mgr.pick_template` 用 `cursor % len(pool)` 索引 `enabled_pool`，而 `pool` 的顺序其实只是
+   **配置清单的物理行顺序**（跟随萌绘时是萌绘 `_workflows()` 的返回顺序），并没有「排序」这一步；
+2. 游标是**绝对计数**（meta 表 `rr_cursor`），`pool` 又会剔除未启用 / 校验失败的模板，
+   停用任意一条就让后面的顺序整体错位一位；
+3. `select_workflows(cfgs, names)` 拿名单当集合做 `name in want` 判断、遍历的是 `cfgs`，
+   所以跟随萌绘时**按什么顺序勾都不影响轮换**；
+4. WebUI 没有序号、也没有「当前轮到哪 / 下一张是谁」，`rr_cursor` 只躺在数据库里，接口没暴露；
+5. 手动「立即画一张」与指令出图走同一个 `generate_one`，游标在生成**之前**就 +1 落库，
+   失败轮也占位，看起来像「跳过了一个」；
+6. 切到「随机」期间游标停滞，切回轮换从旧值接着走；下拉只写「按顺序轮换（重启续轮）」，
+   没说顺序依据是清单行顺序。
+
+### 修复
+
+**A. 顺序可见**
+
+- 新增纯函数 `workflow_mgr.rotation_state()`：返回有序可用名单（含 #N / 稳定 key / 能力）、
+  `next_index` / `next_name` / `last_found`。
+- `/workflows` 附带 `rotation` 字段；「工作流模板」页第一张卡改为「轮换顺序」：
+  `#1 A → #2 B → #3 C ↻` 链、高亮下一张、无可用模板提示、从 #1 重置；
+  模板清单每行显示「轮换 #N」。
+
+**B. 顺序可排**
+
+- local：模板清单每行加 ↑↓，直接改 `workflow_templates` 的行顺序（保存后下一张起生效）；
+- anima：`select_workflows` 改为**按名单顺序**查表返回，`anima.workflow` 从集合升级为有序名单；
+  控制台新增「轮换顺序」有序列表（↑↓ / 移出）与「固定当前顺序以便排序」按钮
+  （把「空名单 = 全部可用」固化成显式名单后才能排）。
+
+**C. 游标不再跳位**
+
+- `Template` 新增稳定 `key`（local 用文件名、anima 用萌绘的 `workflow_id` —— 多条工作流可能
+  共用同一个 `base_id`，不能用它）；`to_public()` 一并带出。
+- `pick_template` 改为记「上一张的 key」，用 `next_index()` 在**当前可用池**里找它的下一条；
+  找不到（首次 / 被删 / 被停用）就从 #1 可预期地重来。库里新键 `rr_last`，
+  旧整数 `rr_cursor` 只在升级后第一轮作过渡，随后自动切换。
+- `random` 分支不再推进游标，切回轮换时从上次轮换选中的那条继续。
+
+**D. 手动出图占位开关**
+
+- 新增 `rotation_manual_advances`（bool，默认 `false`）：「立即画一张」/ `/绘卷 画一张`
+  默认不推进轮换；判定抽成 `should_advance_rotation(reason, mode, has_tpl)`，
+  兼容 `reason="manual"`（指令）与 `"manual:webui"` 两种写法。
+- 游标写入从「选中时」挪到「出图成功后」，**失败轮一律不占位**（下一轮仍是同一条，
+  连续失败在图库里一眼可见）。
+- 新增 `/workflows/rotation/reset`，UI 上「从 #1 重置」。
+
+### 测试
+
+- `tests/test_rotation.py`（新）：用 AST 从 `main.py` 原样抠出 5 个方法再 exec，
+  覆盖手动占位开关、新旧游标过渡、轮换视图、重置、停用中间一条不跳位；
+  本机没有 AstrBot 运行时也能测磁盘上的真代码。
+- `tests/test_workflow_mgr.py`：`pick_template` 断言改按名字游标，新增
+  `template_key` / `next_index` / `rotation_state` / 名单有序与去重 / 加载后自动带 key 等 25 条。
+- `tests/test_schema.py` / `tests/test_config_coerce.py` 补 `rotation_manual_advances`
+  与前端点号键守卫；README 新增「七·七、轮换顺序」章节与排障条目。
+
 ## v0.7.3（题材能力 + 人物锚定 + 词池可读：六个反馈一次收口）
 
 一轮使用反馈里的六个问题，归结为三处结构性缺口：

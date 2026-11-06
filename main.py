@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.3",
+    "v0.7.4",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -493,6 +493,8 @@ class MoePaintPlugin(Star):
         quality = str(profile.get("quality_prefix") or "") if tag_style == "danbooru" else ""
         # 跟随萌绘的工作流没法逐条标记能力，用 anima.subject_scope 整体指定（默认按底模推断）
         scope_cfg = str(acfg.get("subject_scope") or "auto").strip().lower() or "auto"
+        # 萌绘多条工作流可能共用同一个 base_id，游标必须用工作流自己的 id 才不串位
+        wid = str(chosen.get("workflow_id") or "").strip()
         return workflow_mgr.Template(
             name=name,
             file=f"anima:{bid or '?'}",
@@ -511,6 +513,7 @@ class MoePaintPlugin(Star):
             quality_prefix=quality,
             subject_scope=scope_cfg,
             scope=workflow_mgr.resolve_scope(scope_cfg, profile.get("family")),
+            key=f"anima:{wid or bid or name}",
         )
 
     # ------------------------------------------------------------------ #
@@ -684,7 +687,10 @@ class MoePaintPlugin(Star):
         try:
             self.reload_templates()
             mode = str(self._cfg().get("workflow_selection") or "random")
-            tpl, _ = workflow_mgr.pick_template(self._templates, mode, _PICK_RANDOM, 0)
+            last_key, legacy = await self._rotation_cursor(self.store) if self.store else ("", None)
+            tpl, _ = workflow_mgr.pick_template(
+                self._templates, mode, _PICK_RANDOM, last_key, legacy
+            )
             brief = prompter.draw_brief(
                 _PICK_RANDOM,
                 disabled_categories=self._disabled_categories(),
@@ -779,6 +785,62 @@ class MoePaintPlugin(Star):
             logger.warning(f"{PLUGIN_TAG} 模板问题：{'; '.join(f'{t.name}: {t.problem}' for t in bad)}")
         if not workflow_mgr.enabled_pool(self._templates):
             logger.warning(f"{PLUGIN_TAG} 没有可用的工作流模板，调度会空转（检查配置 workflow_templates）")
+
+    # ------------------------------------------------------------------ #
+    # 顺序轮换：游标（记「上一张是谁」）与控制台视图
+    # ------------------------------------------------------------------ #
+
+    def _manual_advances(self) -> bool:
+        """手动出图（「立即画一张」/ 指令）是否占用一个轮换位；默认不占。"""
+        v = self._cfg().get("rotation_manual_advances", False)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("true", "1", "on", "yes")
+
+    def should_advance_rotation(self, reason: str, mode: str, has_tpl: bool) -> bool:
+        """这一轮出图成功后是否推进顺序轮换游标（纯判定，便于自检）。
+
+        指令用 reason="manual"，WebUI/跨插件用 "manual:xxx"，两者都算手动。
+        失败轮在调用方根本不会走到「写游标」那一步，故这里只管来源与模式。
+        """
+        if str(mode or "") != "round_robin" or not has_tpl:
+            return False
+        is_manual = str(reason or "").strip().lower().startswith("manual")
+        return not is_manual or self._manual_advances()
+
+    async def _rotation_cursor(self, store) -> "tuple[str, int | None]":
+        """读轮换游标：新名字游标优先；老整数游标只在升级后第一轮作过渡。"""
+        last = str(await store.get_meta("rr_last", "") or "").strip()
+        if last:
+            return last, None
+        raw = await store.get_meta("rr_cursor", "")
+        if not str(raw or "").strip():
+            return "", None  # 全新安装，没有老游标
+        try:
+            return "", int(str(raw))
+        except ValueError:
+            return "", 0
+
+    async def rotation_state(self) -> dict:
+        """当前轮换视图（只读、不推进游标）；调用方需先 reload_templates()。"""
+        mode = str(self._cfg().get("workflow_selection") or "random")
+        if self.store is None:
+            last, legacy = "", None
+        else:
+            last, legacy = await self._rotation_cursor(self.store)
+        out = workflow_mgr.rotation_state(self._templates, mode, last, legacy)
+        out["manual_advances"] = self._manual_advances()
+        return out
+
+    async def reset_rotation(self) -> dict:
+        """把顺序轮换重置到 #1（清空名字游标与老整数游标）。"""
+        if self.store is None:
+            return {"ok": False, "error": "记录库不可用"}
+        await self.store.set_meta("rr_last", "")
+        await self.store.set_meta("rr_cursor", "0")
+        self.reload_templates()
+        self.debug_log("workflow", "顺序轮换已重置到 #1")
+        return {"ok": True}
 
     # ------------------------------------------------------------------ #
     # 工作流上传 / 解析（WebUI）
@@ -933,13 +995,13 @@ class MoePaintPlugin(Star):
             if store is None:
                 raise RuntimeError("记录库不可用（看初始化日志）")
             mode = str(self._cfg().get("workflow_selection") or "random")
-            try:
-                cursor = int(await store.get_meta("rr_cursor", "0") or 0)
-            except ValueError:
-                cursor = 0
-            tpl, cursor = workflow_mgr.pick_template(self._templates, mode, _PICK_RANDOM, cursor)
-            if mode == "round_robin":
-                await store.set_meta("rr_cursor", str(cursor))
+            last_key, legacy = await self._rotation_cursor(store)
+            tpl, new_last = workflow_mgr.pick_template(
+                self._templates, mode, _PICK_RANDOM, last_key, legacy
+            )
+            # 只有真的出完一张、且该轮允许推进时才落游标：失败轮与手动试画
+            # （默认）都不占位置，定时计划严格按自己的节奏走。
+            should_advance = self.should_advance_rotation(reason, mode, tpl is not None)
 
             brief = prompter.draw_brief(
                 _PICK_RANDOM,
@@ -1024,6 +1086,8 @@ class MoePaintPlugin(Star):
                     image_relpath=rel, sha256=sha16, gen_latency_ms=round(gen_ms, 1), error="",
                 )
                 summary.update(ok=True, id=rec_id, image_path=abs_path, relpath=rel)
+                if should_advance:
+                    await store.set_meta("rr_last", new_last)
                 logger.info(
                     f"{PLUGIN_TAG} 生成成功 #{rec_id}：{brief['category']}·{brief['subject']} "
                     f"（{tpl.name} {width}x{height} seed={seed}，{gen_ms / 1000:.1f}s）"

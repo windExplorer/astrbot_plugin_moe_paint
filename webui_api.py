@@ -408,6 +408,8 @@ async def h_workflows(plugin) -> dict:
             "workflows": [],
             "error": "",
         },
+        # 轮换视图：有序可用名单 + 下一张是谁（只读，不推进游标）
+        "rotation": await plugin.rotation_state(),
     })
 
 
@@ -441,6 +443,12 @@ async def h_workflow_upload(plugin) -> dict:
         subject_scope=str(body.get("subject_scope") or "auto"),
     )
     return ok(res) if res.get("ok") else err(res.get("error") or "入库失败")
+
+
+async def h_rotation_reset(plugin) -> dict:
+    """POST：把顺序轮换重置到 #1（清空名字游标与老整数游标）。"""
+    res = await plugin.reset_rotation()
+    return ok(res) if res.get("ok") else err(res.get("error") or "重置失败")
 
 
 async def h_anima_workflows(plugin) -> dict:
@@ -745,6 +753,7 @@ def register(plugin) -> None:
         ("/workflows", h_workflows, ["GET"]),
         ("/workflows/parse", h_workflow_parse, ["POST"]),
         ("/workflows/upload", h_workflow_upload, ["POST"]),
+        ("/workflows/rotation/reset", h_rotation_reset, ["POST"]),
         ("/anima/workflows", h_anima_workflows, ["GET"]),
         ("/config", h_get_config, ["GET"]),
         ("/config", h_set_config, ["POST"]),

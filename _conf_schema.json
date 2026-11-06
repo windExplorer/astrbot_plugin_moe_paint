@@ -247,7 +247,13 @@
     "type": "string",
     "options": ["random", "round_robin"],
     "default": "random",
-    "hint": "random=每次随机挑一个可用模板；round_robin=按顺序轮换"
+    "hint": "random=每次随机挑一个可用模板；round_robin=按顺序轮换。轮换顺序 = 本插件「工作流模板」清单从上到下（跟随萌绘时 = 参与名单的填写顺序），控制台「轮换顺序」卡可查看与调整"
+  },
+  "rotation_manual_advances": {
+    "description": "手动出图占用轮换位",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭（默认）：「立即画一张」与 /绘卷 画一张 不推进顺序轮换，定时计划严格按自己的节奏走；开启则所有成功出图都算一轮（v0.7.3 及以前的行为）。失败轮一律不占位"
   },
   "workflow_templates": {
     "description": "工作流模板清单",

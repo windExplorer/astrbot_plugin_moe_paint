@@ -58,13 +58,19 @@ ok_tpl2 = workflow_mgr.Template(name="a2", file="a2.json", ok=True, enabled=True
 bad_tpl = workflow_mgr.Template(name="b", file="b.json", ok=False, enabled=True, problem="x")
 off_tpl = workflow_mgr.Template(name="c", file="c.json", ok=True, enabled=False)
 pool = [ok_tpl, ok_tpl2, bad_tpl, off_tpl]
-picked, cur = workflow_mgr.pick_template(pool, "random", random.Random(1), 0)
+picked, last = workflow_mgr.pick_template(pool, "random", random.Random(1), "a.json")
 check("pick_random_excludes_bad", picked in (ok_tpl, ok_tpl2))
-p1, c1 = workflow_mgr.pick_template(pool, "round_robin", random.Random(1), 0)
-p2, c2 = workflow_mgr.pick_template(pool, "round_robin", random.Random(1), c1)
-check("pick_rr_cycles", p1 is ok_tpl and p2 is ok_tpl2 and c1 == 1 and c2 == 2, f"c={c1},{c2}")
-none_tpl, cur = workflow_mgr.pick_template([bad_tpl, off_tpl], "random", random.Random(1), 0)
-check("pick_empty_pool", none_tpl is None)
+check("pick_random_no_advance", last == "a.json", last)
+p1, k1 = workflow_mgr.pick_template(pool, "round_robin", random.Random(1), "")
+p2, k2 = workflow_mgr.pick_template(pool, "round_robin", random.Random(1), k1)
+p3, k3 = workflow_mgr.pick_template(pool, "round_robin", random.Random(1), k2)
+check("pick_rr_cycles", p1 is ok_tpl and p2 is ok_tpl2 and p3 is ok_tpl,
+      f"{p1.name},{p2.name},{p3.name}")
+check("pick_rr_keys", (k1, k2, k3) == ("a.json", "a2.json", "a.json"), f"{k1},{k2},{k3}")
+none_tpl, kept = workflow_mgr.pick_template(
+    [bad_tpl, off_tpl], "round_robin", random.Random(1), "a.json"
+)
+check("pick_empty_pool", none_tpl is None and kept == "a.json")
 
 # ---------- 加载（内置复制 + 校验） ----------
 with tempfile.TemporaryDirectory() as td:
@@ -171,6 +177,13 @@ picked_one = workflow_mgr.select_workflows(cfgs, "动漫")
 check("select_by_name", [w["name"] for w in picked_one] == ["动漫"], str(picked_one))
 picked_multi = workflow_mgr.select_workflows(cfgs, "写实,动漫")
 check("select_multi", len(picked_multi) == 2, str(picked_multi))
+# v0.7.4：名单填写顺序就是轮换顺序（此前按萌绘配置顺序，勾选顺序无效）
+check("select_multi_order",
+      [w["name"] for w in workflow_mgr.select_workflows(cfgs, "动漫,写实")] == ["动漫", "写实"])
+check("select_by_id_order",
+      [w["name"] for w in workflow_mgr.select_workflows(cfgs, "wf_2,wf_1")] == ["动漫", "写实"])
+check("select_order_dedup",
+      [w["name"] for w in workflow_mgr.select_workflows(cfgs, "动漫,wf_2")] == ["动漫"])
 picked_by_id = workflow_mgr.select_workflows(cfgs, "wf_2")
 check("select_by_id", [w["name"] for w in picked_by_id] == ["动漫"], str(picked_by_id))
 picked_disabled = workflow_mgr.select_workflows(cfgs, "停用的")
@@ -182,11 +195,11 @@ check("select_unknown_empty", workflow_mgr.select_workflows(cfgs, "不存在") =
 # 多模板轮换（跟随萌绘时同样走 random / round_robin）
 multi = [workflow_mgr.Template(name=n, file=f"anima:{i}", ok=True, enabled=True, source="anima")
          for i, n in enumerate(["写实", "动漫", "国风"])]
-q1, c1 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), 0)
-q2, c2 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), c1)
-q3, c3 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), c2)
-check("anima_rr_cycles", [q1.name, q2.name, q3.name] == ["写实", "动漫", "国风"] and c3 == 3,
-      f"{q1.name},{q2.name},{q3.name},c={c3}")
+q1, a1 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), "")
+q2, a2 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), a1)
+q3, a3 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), a2)
+check("anima_rr_cycles", [q1.name, q2.name, q3.name] == ["写实", "动漫", "国风"]
+      and a3 == "anima:2", f"{q1.name},{q2.name},{q3.name},k={a3}")
 
 # ---------- v0.5.0：底模画像（提示词风格 / 尺寸 / 质量词） ----------
 pf = workflow_mgr.guess_profile("anima-turbo-v1.0.safetensors")
@@ -276,6 +289,47 @@ with tempfile.TemporaryDirectory() as td:
     pub = a.to_public()
     check("public_exposes_scope", pub.get("scope") == "anime" and pub.get("subject_scope") == "auto",
           str(pub.get("scope")))
+
+# ---------- v0.7.4：顺序轮换（游标记标识、不跳位、可视） ----------
+t3 = workflow_mgr.Template(name="c", file="c.json", ok=True, enabled=True)
+tri = [ok_tpl, ok_tpl2, t3]  # a.json / a2.json / c.json
+check("next_index_start", workflow_mgr.next_index(tri, "") == 0)
+check("next_index_after_first", workflow_mgr.next_index(tri, "a.json") == 1)
+check("next_index_wraps", workflow_mgr.next_index(tri, "c.json") == 0)
+check("next_index_missing_key", workflow_mgr.next_index(tri, "不存在") == 0)
+check("template_key_explicit",
+      workflow_mgr.template_key(workflow_mgr.Template(name="x", file="x.json", key="anima:w1"))
+      == "anima:w1")
+check("template_key_fallback", workflow_mgr.template_key(ok_tpl) == "a.json")
+
+# 停用中间一条：顺序不断裂，仍从「上一张」往后找现存的下一条
+shrunk = [ok_tpl, t3]
+check("no_jump_after_disable", workflow_mgr.next_index(shrunk, "a.json") == 1,
+      str(workflow_mgr.next_index(shrunk, "a.json")))
+check("no_jump_when_last_removed", workflow_mgr.next_index(shrunk, "a2.json") == 0)
+# 老整数游标过渡：rr_cursor=2 表示「下一张是 #3」
+check("legacy_cursor_transition", workflow_mgr.next_index(tri, "", 2) == 2)
+check("legacy_cursor_modulo", workflow_mgr.next_index(tri, "", 5) == 2)
+check("new_key_wins_over_legacy", workflow_mgr.next_index(tri, "a.json", 2) == 1)
+
+st = workflow_mgr.rotation_state(tri, "round_robin", "a.json")
+check("rotation_state_total", st["total"] == 3, str(st))
+check("rotation_state_next", st["next_index"] == 2 and st["next_name"] == "a2", str(st))
+check("rotation_state_items", [i["index"] for i in st["items"]] == [1, 2, 3])
+check("rotation_state_last_found", st["last_found"] is True)
+check("rotation_state_last_lost",
+      workflow_mgr.rotation_state(tri, "round_robin", "gone")["last_found"] is False)
+check("rotation_state_random",
+      workflow_mgr.rotation_state(tri, "random", "a.json")["ordered"] is False)
+check("rotation_state_empty", workflow_mgr.rotation_state([], "round_robin")["total"] == 0)
+
+with tempfile.TemporaryDirectory() as td:
+    wf_dir = Path(td) / "workflows"
+    kt = workflow_mgr.load_templates(
+        wf_dir, [{"name": "动漫", "file": "a.json", "enabled": True}], root() / "builtin")[0]
+    check("load_template_key", kt.key == "local:a.json"
+          and workflow_mgr.template_key(kt) == "local:a.json", kt.key)
+    check("load_template_public_key", kt.to_public().get("key") == "local:a.json")
 
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

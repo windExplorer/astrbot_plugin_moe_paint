@@ -53,6 +53,7 @@ FRONTEND_KEYS = [
     "schedule.max_per_day",
     "anima.follow_server", "anima.server_key", "anima.workflow", "anima.size_preset",
     "anima.prompt_profile", "anima.subject_scope",
+    "rotation_manual_advances",
     "theme.disabled_categories", "theme.extra_words", "theme.category_weights",
     "theme.category_scopes", "theme.character_names",
     "delivery.sessions", "delivery.caption_on", "delivery.caption_template",
@@ -61,7 +62,7 @@ FRONTEND_KEYS = [
 missing = [k for k in FRONTEND_KEYS if cc.resolve_spec(SCHEMA, k)[2] is None]
 check("resolve_all_frontend_keys", not missing, "缺: " + ", ".join(missing))
 
-for top in ("enabled", "workflow_source", "workflow_selection",
+for top in ("enabled", "workflow_source", "workflow_selection", "rotation_manual_advances",
             "workflow_templates", "admin_notify_umo"):
     check(f"resolve_top_{top}", cc.resolve_spec(SCHEMA, top)[2] is not None)
 

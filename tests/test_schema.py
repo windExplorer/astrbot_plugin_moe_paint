@@ -104,6 +104,7 @@ def main() -> int:
         ("anima", "prompt_profile"),
         ("anima", "subject_scope"),
         ("workflow_source",),
+        ("rotation_manual_advances",),
         ("delivery", "sessions"),
         ("gallery", "max_total_mb"),
         ("theme", "category_weights"),

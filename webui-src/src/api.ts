@@ -149,6 +149,29 @@ export interface TemplatePublic {
   quality_prefix?: string;
   subject_scope?: string;
   scope?: string;
+  key?: string;
+}
+
+export interface RotationItem {
+  index: number;
+  key: string;
+  name: string;
+  file: string;
+  source: string;
+  scope: string;
+}
+
+export interface RotationPayload {
+  mode: string;
+  ordered: boolean;
+  total: number;
+  items: RotationItem[];
+  next_index: number;
+  next_name: string;
+  next_key: string;
+  last_key: string;
+  last_found: boolean;
+  manual_advances: boolean;
 }
 
 export interface AnimaBrief {
@@ -399,7 +422,13 @@ export function apiWorkflows() {
     workflows_dir: string;
     source: string;
     anima?: AnimaWorkflowPayload;
+    rotation: RotationPayload;
   }>("/workflows");
+}
+
+/** 把顺序轮换重置到 #1（清空名字游标与老整数游标）。 */
+export function apiResetRotation() {
+  return apiPost<{ ok: boolean }>("/workflows/rotation/reset");
 }
 
 /** 只解析不入库（上传预览）。 */

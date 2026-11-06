@@ -168,6 +168,7 @@ class Template:
     quality_prefix: str = ""  # danbooru 系自动加的质量词（其余为空）
     subject_scope: str = "auto"  # 配置值 auto / anime / photo / both
     scope: str = "both"  # 生效能力，抽签时用它筛类别
+    key: str = ""  # 轮换游标的稳定标识（local:文件名 / anima:工作流 id）
 
     def to_public(self) -> dict:
         """给 WebUI / 指令展示的公开形状（不含工作流 JSON 本体）。"""
@@ -175,6 +176,7 @@ class Template:
             "name": self.name,
             "file": self.file,
             "source": self.source,
+            "key": self.key,
             "tag_style": self.tag_style,
             "size_preset": self.size_preset,
             "prompt_profile": self.prompt_profile,
@@ -403,10 +405,13 @@ def split_names(raw) -> list:
 
 
 def select_workflows(cfgs: list, names, require_base: bool = True) -> list:
-    """按名称/ID 列表挑工作流；名单为空 = 全部可用。
+    """按**有序名单**挑工作流；名单为空 = 全部可用（按萌绘列表顺序）。
 
     可用 = 自身 enabled 且（require_base 时）关联了基础工作流（`base_id`）。
-    用于「跟随萌绘」模式下的多工作流轮换：留空即全部参与。
+
+    v0.7.4：名单的填写顺序**就是轮换顺序**。此前只是拿它当集合做 `name in want`
+    判断，顺序仍取萌绘配置列表，用户按什么顺序勾都不影响出图，是「顺序看不懂」
+    的主要来源。现在按名单逐项查表，同时兼容用 workflow_id 指定。
     """
     usable = [
         w for w in (cfgs or [])
@@ -417,12 +422,19 @@ def select_workflows(cfgs: list, names, require_base: bool = True) -> list:
     want = split_names(names)
     if not want:
         return usable
-    picked: list[dict] = []
+    by_key: dict = {}
     for w in usable:
-        name = str(w.get("name") or "").strip()
-        wid = str(w.get("workflow_id") or "").strip()
-        if (name and name in want) or (wid and wid in want):
-            picked.append(w)
+        for k in (str(w.get("name") or "").strip(), str(w.get("workflow_id") or "").strip()):
+            if k and k not in by_key:
+                by_key[k] = w
+    picked: list[dict] = []
+    seen: set[int] = set()
+    for n in want:
+        w = by_key.get(n)
+        if w is None or id(w) in seen:
+            continue
+        seen.add(id(w))
+        picked.append(w)
     return picked
 
 
@@ -499,16 +511,18 @@ def load_templates(
         except FileNotFoundError:
             out.append(
                 Template(
-                    name=name, file=fname, ok=False,
+                    name=name, file=fname, ok=False, key=f"local:{fname}",
                     problem=f"工作流文件不存在：{fname}（把 API 格式 JSON 丢进 {workflows_dir}）",
                 )
             )
             continue
         except Exception as e:
-            out.append(Template(name=name, file=fname, ok=False, problem=f"JSON 解析失败: {e}"))
+            out.append(Template(name=name, file=fname, ok=False, key=f"local:{fname}",
+                                problem=f"JSON 解析失败: {e}"))
             continue
         if not isinstance(wf, dict) or not wf:
-            out.append(Template(name=name, file=fname, ok=False, problem="JSON 不是 API 格式工作流"))
+            out.append(Template(name=name, file=fname, ok=False, key=f"local:{fname}",
+                                problem="JSON 不是 API 格式工作流"))
             continue
         override = {
             "positive_node": entry.get("positive_node"),
@@ -562,6 +576,7 @@ def load_templates(
             quality_prefix=quality,
             subject_scope=scope_cfg,
             scope=scope,
+            key=f"local:{fname}",
         )
         out.append(tpl)
     return out
@@ -571,17 +586,87 @@ def enabled_pool(templates: list[Template]) -> list[Template]:
     return [t for t in templates or [] if t.enabled and t.ok]
 
 
+def template_key(t: Template) -> str:
+    """模板的稳定标识：显式 key → 文件名 → 名字（兜底，老数据/手工构造）。"""
+    return (
+        str(getattr(t, "key", "") or "").strip()
+        or str(t.file or "").strip()
+        or str(t.name or "").strip()
+    )
+
+
+def next_index(pool: list[Template], last_key: str = "", legacy_cursor=None) -> int:
+    """算出本轮该画第几条（0-based）；不推进任何状态。
+
+    v0.7.4 起游标记「上一张的稳定标识」而不是绝对计数，在**当前可用池**里找它的
+    下一条：停用 / 新增 / 校验失败导致池子变化时顺序不会错位。
+    - 找不到上一张（首次启用、模板被删/停用/改名）→ 从 #1 重新、可预期地开始；
+    - 老版本升级（库里只有整数 `rr_cursor`）→ 把它当「下一张索引」用于这一轮，
+      调用方随后写入名字游标，之后不再走这条分支。
+    """
+    if not pool:
+        return 0
+    n = len(pool)
+    lk = str(last_key or "").strip()
+    if lk:
+        keys = [template_key(t) for t in pool]
+        try:
+            return (keys.index(lk) + 1) % n
+        except ValueError:
+            return 0
+    if legacy_cursor is not None:
+        try:
+            return int(legacy_cursor) % n
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def pick_template(
-    templates: list[Template], mode: str, rng: random.Random, cursor: int
-) -> tuple["Template | None", int]:
-    """按 random / round_robin 选模板；返回 (模板, 新游标)。无可用的返回 (None, cursor)。"""
+    templates: list[Template], mode: str, rng: random.Random,
+    last_key: str = "", legacy_cursor=None,
+) -> "tuple[Template | None, str]":
+    """按 random / round_robin 选模板；返回 (模板, 新的 last_key)。
+
+    round_robin 靠「上一张的标识」推进；random 不推进游标，切回轮换时从上次
+    轮换选中的那条继续。无可用的返回 (None, 原 last_key)。
+    """
     pool = enabled_pool(templates)
     if not pool:
-        return None, cursor
-    if str(mode or "random").strip() == "round_robin":
-        idx = int(cursor) % len(pool)
-        return pool[idx], idx + 1
-    return rng.choice(pool), cursor
+        return None, str(last_key or "")
+    if str(mode or "random").strip() != "round_robin":
+        return rng.choice(pool), str(last_key or "")
+    idx = next_index(pool, last_key, legacy_cursor)
+    return pool[idx], template_key(pool[idx])
+
+
+def rotation_state(templates, mode, last_key: str = "", legacy_cursor=None) -> dict:
+    """给控制台看的轮换视图：有序可用名单 + 下一张序号与名字。纯函数、只读。"""
+    pool = enabled_pool(templates)
+    idx = next_index(pool, last_key, legacy_cursor)
+    m = str(mode or "random").strip()
+    return {
+        "mode": m,
+        "ordered": m == "round_robin",
+        "total": len(pool),
+        "items": [
+            {
+                "index": i + 1,
+                "key": template_key(t),
+                "name": t.name,
+                "file": t.file,
+                "source": t.source,
+                "scope": getattr(t, "scope", "both"),
+            }
+            for i, t in enumerate(pool)
+        ],
+        "next_index": (idx + 1) if pool else 0,
+        "next_name": pool[idx].name if pool else "",
+        "next_key": template_key(pool[idx]) if pool else "",
+        "last_key": str(last_key or ""),
+        "last_found": bool(pool) and bool(last_key)
+        and any(template_key(t) == str(last_key) for t in pool),
+    }
 
 
 def inject(

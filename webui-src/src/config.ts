@@ -53,6 +53,7 @@ export const KNOWN_KEYS = new Set<string>([
   "anima.subject_scope",
   "workflow_source",
   "workflow_selection",
+  "rotation_manual_advances",
   "workflow_templates",
   "theme.disabled_categories",
   "theme.extra_words",
