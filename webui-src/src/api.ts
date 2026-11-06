@@ -97,6 +97,14 @@ export function apiPost<T = any>(endpoint: string, body?: unknown, timeoutMs?: n
 
 // ---------------------------------------------------------------- 类型
 
+export interface DeliveredItem {
+  umo: string;
+  ok: boolean;
+  ts: number;
+  error?: string;
+  via?: string;
+}
+
 export interface GenRecord {
   id: number;
   ts: number;
@@ -121,7 +129,7 @@ export interface GenRecord {
   gen_latency_ms: number | null;
   error: string;
   starred: 0 | 1 | number;
-  delivered?: { umo: string; ok: boolean; ts: number; error?: string; via?: string }[];
+  delivered?: DeliveredItem[];
 }
 
 export interface TemplatePublic {
@@ -129,10 +137,20 @@ export interface TemplatePublic {
   file: string;
   tag_style: string;
   size_preset: string;
+  default_negative: string;
   enabled: boolean;
   ok: boolean;
   problem: string;
   nodes: Record<string, any>;
+}
+
+export interface AnimaBrief {
+  installed: boolean;
+  version: string;
+  follow_server: boolean;
+  server_key: string;
+  active_url: string;
+  active_name: string;
 }
 
 export interface StatusPayload {
@@ -142,18 +160,22 @@ export interface StatusPayload {
   consecutive_failures: number;
   next_due: string | null;
   last_run_note: string;
+  last_run_ts: number;
   mode: string;
   interval_minutes: number;
+  jitter_minutes: number;
   daily_times: string;
+  quiet_enabled: boolean;
   quiet_hours: string;
   max_per_day: number;
   counts: { total: number; success: number; failed: number; running: number };
   today_success: number;
   templates: TemplatePublic[];
   selection_mode: string;
-  comfy: { ok: boolean; elapsed_ms: number; error: string };
+  comfy: { ok: boolean; elapsed_ms: number; error: string; url?: string; source?: string };
   llm: { provider_id: string; found: boolean; label: string };
   delivery_sessions: number;
+  anima: AnimaBrief;
 }
 
 export interface StatsPayload {
@@ -165,6 +187,84 @@ export interface StatsPayload {
   by_category: { category: string; success: number; failed: number }[];
   by_workflow: { workflow: string; success: number; failed: number }[];
   days: { day: string; success: number }[];
+}
+
+export interface AnimaServer {
+  key: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  device: string;
+}
+
+export interface AnimaInfo {
+  installed: boolean;
+  activated: boolean;
+  version: string;
+  servers: AnimaServer[];
+  active_key: string;
+  active_url: string;
+  active_name: string;
+  error: string;
+  follow_server: boolean;
+  server_key: string;
+  effective_url: string;
+  url_source: "manual" | "anima" | string;
+  manual_url: string;
+  anima_plugin_name: string;
+}
+
+export interface DebugEnv {
+  comfy_url: string;
+  comfy_url_source: string;
+  manual_url: string;
+  gallery_dir: string;
+  workflows_dir: string;
+  db_path: string;
+  delivery_sessions: string[];
+  templates: TemplatePublic[];
+  selection_mode: string;
+  queue_defer_threshold: number;
+  log_capacity: number;
+}
+
+export interface DebugLogRow {
+  ts: number;
+  kind: string;
+  msg: string;
+}
+
+export interface ComfyProbe {
+  ok: boolean;
+  url: string;
+  source?: string;
+  elapsed_ms?: number;
+  error?: string;
+  queue?: { running: number; pending: number } | null;
+  queue_error?: string;
+}
+
+export interface LlmPreview {
+  ok: boolean;
+  error: string;
+  brief: Record<string, string> | null;
+  template: string;
+  tag_style: string;
+  size: { width: number; height: number } | null;
+  prompt: string;
+  negative: string;
+  caption: string;
+  raw: string;
+  llm_provider: string;
+  llm_ms: number;
+  total_ms: number;
+}
+
+export interface ProviderRow {
+  id: string;
+  model: string;
+  label: string;
+  is_default: boolean;
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -195,12 +295,16 @@ export function apiRecords(f: {
   keyword?: string;
   starred?: number;
 }) {
-  return apiGet<{ rows: GenRecord[]; total: number }>(`/records?${qs(f)}`, 20000);
+  return apiGet<{ rows: GenRecord[]; total: number }>(`/records?${qs(f)}`, 25000);
+}
+
+export function apiRecord(id: number) {
+  return apiGet<GenRecord>(`/record?id=${id}`, 15000);
 }
 
 /** 缩略图（data URL；内嵌页 <img> 的唯一可靠姿势）。 */
 export function apiThumb(id: number, size = 320) {
-  return apiGet<{ data_url: string; size: number }>(`/thumb?id=${id}&size=${size}`, 20000);
+  return apiGet<{ data_url: string; size: number }>(`/thumb?id=${id}&size=${size}`, 25000);
 }
 
 export function apiControl(action: "pause" | "resume" | "trigger", theme?: string) {
@@ -235,21 +339,50 @@ export function apiWorkflows() {
 
 // ---------------------------------------------------------------- 配置
 
-export interface ProviderRow {
-  id: string;
-  model: string;
-  label: string;
-  is_default: boolean;
-}
-
 export function apiGetConfig() {
   return apiGet<{ items: Record<string, any>; schema: Record<string, any> }>("/config", 15000);
 }
 
 export function apiSaveConfig(items: Record<string, any>) {
-  return apiPost<{ changed: string[] }>("/config", { items }, 15000);
+  return apiPost<{ changed: string[] }>("/config", { items }, 20000);
 }
 
 export function apiProviders() {
   return apiGet<{ items: ProviderRow[]; default_id: string }>("/providers", 10000);
+}
+
+// ---------------------------------------------------------------- 关联萌绘
+
+export function apiAnima() {
+  return apiGet<AnimaInfo>("/anima", 15000);
+}
+
+export function apiAnimaSync(action: "follow" | "copy" | "off", serverKey?: string) {
+  return apiPost<{ message: string; follow_server: boolean; server_key: string; effective_url: string; url_source: string }>(
+    "/anima/sync",
+    { action, server_key: serverKey || "" },
+    15000,
+  );
+}
+
+// ---------------------------------------------------------------- 调试
+
+export function apiDebugEnv() {
+  return apiGet<DebugEnv>("/debug/env", 15000);
+}
+
+export function apiDebugComfy(url = "") {
+  return apiPost<ComfyProbe>("/debug/comfy", { url }, 30000);
+}
+
+export function apiDebugLlm(theme = "") {
+  return apiPost<LlmPreview>("/debug/llm", { theme }, 120000);
+}
+
+export function apiDebugDelivery(umo: string, text = "") {
+  return apiPost<{ ok: boolean; error: string }>("/debug/delivery", { umo, text }, 30000);
+}
+
+export function apiDebugLogs(limit = 120) {
+  return apiGet<{ rows: DebugLogRow[] }>(`/debug/logs?limit=${limit}`, 15000);
 }

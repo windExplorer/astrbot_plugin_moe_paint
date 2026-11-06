@@ -18,6 +18,8 @@ import json
 import random
 import shutil
 import time
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -30,6 +32,8 @@ from . import comfy_client, delivery, gallery_store, prompter, scheduler, webui_
 
 PLUGIN_NAME = "astrbot_plugin_moe_paint"
 PLUGIN_TAG = "[萌萌绘卷]"
+# 关联萌绘（ComfyUI萌绘）的插件名：只读它的配置取服务器地址，不调用其内部接口
+ANIMA_PLUGIN_NAME = "astrbot_plugin_comfyui_anima"
 
 HELP_TEXT = (
     "萌萌绘卷：定时用 LLM 生成提示词自动绘图，投递白名单会话，生成记录进图库 WebUI。\n"
@@ -47,7 +51,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.1.0",
+    "v0.3.0",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -85,6 +89,8 @@ class MoePaintPlugin(Star):
         self._client: "comfy_client.ComfyUIClient | None" = None
         self._client_key: "tuple | None" = None
         self._templates: "list[workflow_mgr.Template]" = []
+        # 调试用的内存环形日志（不落盘，重启即清空；WebUI「调试」页读它）
+        self._logs: "deque[dict]" = deque(maxlen=400)
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -177,13 +183,121 @@ class MoePaintPlugin(Star):
             scfg["paused_manual"] = bool(paused)
             self._save()
 
+    def reschedule(self) -> None:
+        """按当前配置重算下次计划点（改完调度配置立即生效，不用等旧时刻自然到期）。"""
+        try:
+            self.sched.next_due = scheduler.advance(self._schedule_cfg(), datetime.now(), _PICK_RANDOM)
+            self.debug_log("schedule", f"已按新配置重算下次计划：{self.sched.next_due:%Y-%m-%d %H:%M}")
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 重算下次计划失败: {e}")
+
+    # ------------------------------------------------------------------ #
+    # 调试日志（内存环形缓冲，不落盘）
+    # ------------------------------------------------------------------ #
+
+    def debug_log(self, kind: str, msg: str) -> None:
+        """记一条调试事件（WebUI 调试页可见）。任何异常都吞掉，绝不影响主流程。"""
+        try:
+            self._logs.append({
+                "ts": int(time.time()),
+                "kind": str(kind or "info"),
+                "msg": str(msg)[:500],
+            })
+        except Exception:
+            pass
+
+    def debug_logs(self, limit: int = 120) -> list:
+        try:
+            n = max(1, min(400, int(limit)))
+        except (TypeError, ValueError):
+            n = 120
+        return list(self._logs)[-n:][::-1]
+
+    # ------------------------------------------------------------------ #
+    # 关联萌绘：只读它的配置（comfyui_servers），拿服务器地址
+    # ------------------------------------------------------------------ #
+
+    def _anima_star(self):
+        try:
+            return self.context.get_registered_star(ANIMA_PLUGIN_NAME)
+        except Exception as e:
+            logger.debug(f"{PLUGIN_TAG} 读取萌绘插件元数据失败: {e}")
+            return None
+
+    def _anima_cfg(self) -> dict:
+        md = self._anima_star()
+        cfg = getattr(md, "config", None) if md is not None else None
+        return cfg if isinstance(cfg, dict) else {}
+
+    def anima_info(self) -> dict:
+        """萌绘联动快照：是否安装 / 版本 / 服务器列表 / 当前会用哪台。"""
+        md = self._anima_star()
+        info: dict = {
+            "installed": md is not None,
+            "activated": bool(getattr(md, "activated", False)) if md is not None else False,
+            "version": str(getattr(md, "version", "") or "") if md is not None else "",
+            "servers": [],
+            "active_key": "",
+            "active_url": "",
+            "active_name": "",
+            "error": "",
+        }
+        if md is None:
+            return info
+        cfg = self._anima_cfg()
+        raw = cfg.get("comfyui_servers")
+        servers: list[dict] = []
+        if isinstance(raw, list):
+            for i, s in enumerate(raw):
+                if not isinstance(s, dict):
+                    continue
+                url = str(s.get("url") or "").strip()
+                if not url:
+                    continue
+                servers.append({
+                    "key": str(s.get("__template_key") or ""),
+                    "name": str(s.get("name") or f"服务器{i + 1}"),
+                    "url": url,
+                    "enabled": bool(s.get("enabled")),
+                    "device": str(s.get("device") or ""),
+                })
+        info["servers"] = servers
+        if not servers:
+            info["error"] = "萌绘里还没有可用的 ComfyUI 服务器（先去萌绘控制台配置）"
+            return info
+        want = str(self._sub("anima").get("server_key") or "").strip()
+        chosen = None
+        if want:
+            for s in servers:
+                if want in (s["key"], s["name"]):
+                    chosen = s
+                    break
+        if chosen is None:
+            chosen = next((s for s in servers if s["enabled"]), servers[0])
+        info.update(
+            active_key=chosen["key"],
+            active_url=chosen["url"],
+            active_name=chosen["name"],
+        )
+        return info
+
+    def _comfy_url(self) -> "tuple[str, str]":
+        """(生效地址, 来源 manual|anima)。follow_server 开启且萌绘有地址时用萌绘的。"""
+        manual = str(self._sub("comfyui").get("url") or "http://127.0.0.1:8188").strip()
+        manual = manual or "http://127.0.0.1:8188"
+        if bool(self._sub("anima").get("follow_server")):
+            info = self.anima_info()
+            if info.get("active_url"):
+                return str(info["active_url"]), "anima"
+        return manual, "manual"
+
     # ------------------------------------------------------------------ #
     # ComfyUI 客户端（按配置懒建；url/timeout 变了才重建）
     # ------------------------------------------------------------------ #
 
     def _get_client(self) -> "comfy_client.ComfyUIClient | None":
         sub = self._sub("comfyui")
-        url = str(sub.get("url") or "http://127.0.0.1:8188").strip()
+        url, _src = self._comfy_url()
         try:
             timeout = max(30, int(sub.get("draw_timeout") or 180))
         except (TypeError, ValueError):
@@ -206,15 +320,46 @@ class MoePaintPlugin(Star):
 
     async def _comfy_status(self) -> dict:
         """WebUI 状态页用：探活（6s 封顶，不阻塞页面）。"""
+        url, src = self._comfy_url()
         client = self._get_client()
         if client is None:
-            return {"ok": False, "error": "客户端未初始化", "url": ""}
+            return {"ok": False, "error": "客户端未初始化", "url": url, "source": src}
         try:
-            return await asyncio.wait_for(client.probe(), timeout=6)
+            res = await asyncio.wait_for(client.probe(), timeout=6)
         except asyncio.TimeoutError:
-            return {"ok": False, "elapsed_ms": 6000, "error": "探活超时（6s）"}
+            res = {"ok": False, "elapsed_ms": 6000, "error": "探活超时（6s）"}
         except Exception as e:
-            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        res = dict(res or {})
+        res["url"] = url
+        res["source"] = src
+        return res
+
+    async def debug_comfy(self, url: str = "", timeout_s: int = 8) -> dict:
+        """调试：对指定地址（空 = 当前生效地址）探活 + 读队列，不写任何配置。"""
+        url = str(url or "").strip()
+        source = "manual"
+        if not url:
+            url, source = self._comfy_url()
+        url = url.rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            return {"ok": False, "url": url, "error": "地址需以 http:// 或 https:// 开头"}
+        probe_client = comfy_client.ComfyUIClient(url, timeout=30, probe_timeout=timeout_s)
+        out: dict = {"ok": False, "url": url, "source": source, "error": "", "queue": None}
+        try:
+            out.update(await probe_client.probe())
+            try:
+                q = await asyncio.wait_for(probe_client.get_queue(), timeout=timeout_s)
+                out["queue"] = {
+                    "running": len((q or {}).get("queue_running") or []),
+                    "pending": len((q or {}).get("queue_pending") or []),
+                }
+            except Exception as e:
+                out["queue_error"] = f"{type(e).__name__}: {e}"
+        finally:
+            await self._close_quietly(probe_client)
+        self.debug_log("comfy", f"连通性测试 {url} → {'OK ' + str(out.get('elapsed_ms')) + 'ms' if out.get('ok') else 'FAIL ' + str(out.get('error'))}")
+        return out
 
     async def remote_queue_ahead(self) -> int:
         """读远程 /queue 估算前方任务数（排队 + 执行中，与萌绘同口径）。
@@ -293,7 +438,64 @@ class MoePaintPlugin(Star):
                 user_prompt + f"\n\n你上一次的输出不合规（{e}）。重新输出，只输出 JSON 对象本身。",
             )
             payload = prompter.parse_llm_payload(text)
+        payload["_raw"] = text[:4000]
         return payload, label, (time.monotonic() - t0) * 1000
+
+    async def debug_llm(self, theme: str = "") -> dict:
+        """调试：真的跑一次「抽签 → LLM → 尺寸落值」，但不提交 ComfyUI、不写库。
+
+        用来验证模型/提示词契约是否正常——图库里的失败记录只能看到结果，
+        这里能看到简报、原始返回、耗时与落到的宽高。
+        """
+        t0 = time.monotonic()
+        out: dict = {"ok": False, "error": "", "brief": None, "template": "", "tag_style": "",
+                     "size": None, "prompt": "", "negative": "", "caption": "",
+                     "raw": "", "llm_provider": "", "llm_ms": 0, "total_ms": 0}
+        try:
+            self.reload_templates()
+            mode = str(self._cfg().get("workflow_selection") or "random")
+            tpl, _ = workflow_mgr.pick_template(self._templates, mode, _PICK_RANDOM, 0)
+            brief = prompter.draw_brief(
+                _PICK_RANDOM,
+                disabled_categories=self._disabled_categories(),
+                extra=self._theme_extra(),
+            )
+            if str(theme or "").strip():
+                brief["category"] = "自定义"
+                brief["subject"] = str(theme).strip()[:50]
+            out["brief"] = brief
+            tag_style = tpl.tag_style if tpl else "danbooru"
+            out["tag_style"] = tag_style
+            out["template"] = tpl.name if tpl else "（无可用模板，仅测提示词）"
+            sizes = tpl.sizes if tpl else prompter.SIZE_PRESETS["sdxl"]
+            payload, label, ms = await self._llm_prompt(brief, tpl or workflow_mgr.Template(name="", file=""))
+            width, height = prompter.pick_size(sizes, brief["orientation"], brief["composition"], _PICK_RANDOM)
+            out.update(
+                ok=True, prompt=payload.get("prompt", ""), negative=payload.get("negative", ""),
+                caption=payload.get("caption", ""), raw=payload.get("_raw", ""),
+                llm_provider=label, llm_ms=round(ms, 1), size={"width": width, "height": height},
+            )
+            self.debug_log("llm", f"试跑成功（{label}，{ms / 1000:.1f}s，{width}x{height}）")
+        except Exception as e:
+            out["error"] = f"{type(e).__name__}: {e}"[:400]
+            self.debug_log("llm", f"试跑失败：{out['error']}")
+        out["total_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        return out
+
+    async def debug_delivery(self, umo: str, text: str = "") -> dict:
+        """调试：往指定会话发一条测试消息（不写记录、不进投递名单）。"""
+        umo = str(umo or "").strip()
+        if not umo:
+            return {"ok": False, "error": "请填目标会话 UMO（如 aiocqhttp:GroupMessage:123456）"}
+        body = str(text or "").strip() or "萌萌绘卷 · 投递自检消息（收到说明投递链路正常）"
+        try:
+            okd = bool(await StarTools.send_message(umo, MessageChain(chain=[Plain(body)])))
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"[:200]
+            self.debug_log("delivery", f"测试投递 {umo} 失败：{err}")
+            return {"ok": False, "error": err}
+        self.debug_log("delivery", f"测试投递 {umo} → {'成功' if okd else '未找到平台实例'}")
+        return {"ok": okd, "error": "" if okd else "未找到匹配的平台实例（检查 UMO 的平台 id）"}
 
     # ------------------------------------------------------------------ #
     # 模板
@@ -397,6 +599,11 @@ class MoePaintPlugin(Star):
                 tag_style=tpl.tag_style if tpl else "",
             )
             summary["id"] = rec_id
+            self.debug_log(
+                "generate",
+                f"#{rec_id} 开始（{reason}｜{brief['category']}·{brief['subject']}"
+                f"｜模板 {tpl.name if tpl else '无'}）",
+            )
             try:
                 if tpl is None:
                     raise RuntimeError("没有可用的工作流模板（检查配置 workflow_templates 与 data 目录）")
@@ -455,6 +662,11 @@ class MoePaintPlugin(Star):
                     f"{PLUGIN_TAG} 生成成功 #{rec_id}：{brief['category']}·{brief['subject']} "
                     f"（{tpl.name} {width}x{height} seed={seed}，{gen_ms / 1000:.1f}s）"
                 )
+                self.debug_log(
+                    "generate",
+                    f"#{rec_id} 成功（{tpl.name} {width}x{height}，总 {gen_ms / 1000:.1f}s，"
+                    f"LLM {llm_ms / 1000:.1f}s）",
+                )
 
                 # 投递：指令触发 → 当前会话直发；其余 → 白名单会话
                 if event is not None:
@@ -484,6 +696,7 @@ class MoePaintPlugin(Star):
                 except Exception:
                     pass
                 logger.error(f"{PLUGIN_TAG} 生成失败 #{rec_id}: {summary['error']}")
+                self.debug_log("error", f"#{rec_id} 失败：{summary['error']}")
             # 收尾：LRU 淘汰（低频，失败也做）
             try:
                 max_mb = self._float_of(self._sub("gallery"), "max_total_mb", 1024.0)
@@ -665,18 +878,27 @@ class MoePaintPlugin(Star):
     def _schedule_desc(self) -> str:
         scfg = self._schedule_cfg()
         if str(scfg.get("mode") or "interval") == "daily":
-            return f"每日 {scfg.get('daily_times')}"
-        try:
-            minutes = int(scfg.get("interval_minutes") or 0)
-        except (TypeError, ValueError):
-            minutes = 0
-        if minutes <= 0 and scfg.get("interval_hours") is not None:
-            # 旧配置键兼容（v0.1.1 及更早的 interval_hours，小时）
+            desc = f"每天 {scfg.get('daily_times')}"
+        else:
             try:
-                minutes = int(float(scfg.get("interval_hours")) * 60)
+                minutes = int(scfg.get("interval_minutes") or 0)
             except (TypeError, ValueError):
                 minutes = 0
-        desc = f"每 {minutes or 360} 分钟"
-        if minutes and minutes % 60 == 0:
-            desc = f"每 {minutes // 60} 小时"
-        return f"{desc} ±{scfg.get('jitter_minutes')} 分钟"
+            if minutes <= 0 and scfg.get("interval_hours") is not None:
+                # 旧配置键兼容（v0.1.1 及更早的 interval_hours，小时）
+                try:
+                    minutes = int(float(scfg.get("interval_hours")) * 60)
+                except (TypeError, ValueError):
+                    minutes = 0
+            minutes = minutes or 360
+            if minutes % 1440 == 0:
+                span = f"每 {minutes // 1440} 天"
+            elif minutes % 60 == 0:
+                span = f"每 {minutes // 60} 小时"
+            else:
+                span = f"每 {minutes} 分钟"
+            jitter = self._int_of(scfg, "jitter_minutes", 0, lo=0, hi=1440)
+            desc = f"{span}" + (f" ±{jitter} 分钟" if jitter else "")
+        if scheduler.quiet_span_of(scfg) is not None:
+            desc += f"，安静时段 {scfg.get('quiet_hours')} 跳过"
+        return desc

@@ -1,6 +1,7 @@
 import { createApp } from "vue";
 import App from "./App.vue";
+import { router } from "./router";
+import "./styles.css";
 
-// 无路由：图库是单页（网格 + 详情抽屉）。页内不用 localStorage（sandbox 无
-// allow-same-origin，见 bridge.ts 头注），筛选状态留在内存即可。
-createApp(App).mount("#app");
+// 左右结构 + hash 路由（见 router.ts / bridge.ts 头注）。
+createApp(App).use(router).mount("#app");

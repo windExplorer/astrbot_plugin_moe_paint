@@ -35,6 +35,27 @@ check("quiet_cross_midnight_in", scheduler.in_quiet_hours(dtime(23, 30), q2) and
 check("quiet_cross_midnight_out", not scheduler.in_quiet_hours(dtime(12, 0), q2))
 check("quiet_none_span", scheduler.in_quiet_hours(dtime(3), None) is False)
 
+# ---------- 安静时段开关（v0.3.0：用开关停用，不靠清空时间） ----------
+check(
+    "quiet_span_default_on",
+    scheduler.quiet_span_of({"quiet_hours": "01:00-08:00"}) == (dtime(1), dtime(8)),
+)
+check(
+    "quiet_span_off_bool",
+    scheduler.quiet_span_of({"quiet_enabled": False, "quiet_hours": "01:00-08:00"}) is None,
+)
+check(
+    "quiet_span_off_string",
+    scheduler.quiet_span_of({"quiet_enabled": "false", "quiet_hours": "01:00-08:00"}) is None,
+)
+check(
+    "quiet_span_on_string",
+    scheduler.quiet_span_of({"quiet_enabled": "true", "quiet_hours": "23:00-06:00"})
+    == (dtime(23), dtime(6)),
+)
+check("quiet_span_no_time", scheduler.quiet_span_of({"quiet_enabled": True}) is None)
+check("quiet_span_none_cfg", scheduler.quiet_span_of(None) is None)
+
 # ---------- 每日时刻表 ----------
 check("daily_parse", scheduler.parse_daily_times("09:30,20:00") == [(9, 30), (20, 0)])
 check("daily_parse_dedup", scheduler.parse_daily_times("20:00,09:30,20:00") == [(9, 30), (20, 0)])

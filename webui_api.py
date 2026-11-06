@@ -42,6 +42,15 @@ def _qi(name: str, default: int, lo: int, hi: int) -> int:
         return default
 
 
+def _bool_of(v, default: bool = True) -> bool:
+    """配置布尔容错（"false"/"0"/"off" 视为关闭）。"""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
+
+
 async def _payload() -> dict:
     try:
         data = await request.json(default=None)
@@ -94,6 +103,8 @@ async def h_status(plugin) -> dict:
     prov = plugin._provider()
     pid_cfg = str(plugin._sub("llm").get("provider_id") or "").strip()
     scfg = plugin._schedule_cfg()
+    anima = plugin.anima_info()
+    acfg = plugin._sub("anima")
     return ok({
         "enabled": bool(plugin._cfg().get("enabled", True)),
         "paused_manual": bool(scfg.get("paused_manual", False)),
@@ -104,7 +115,9 @@ async def h_status(plugin) -> dict:
         "last_run_ts": sched.last_run_ts,
         "mode": str(scfg.get("mode") or "interval"),
         "interval_minutes": scfg.get("interval_minutes"),
+        "jitter_minutes": scfg.get("jitter_minutes"),
         "daily_times": str(scfg.get("daily_times") or ""),
+        "quiet_enabled": _bool_of(scfg.get("quiet_enabled", True), True),
         "quiet_hours": str(scfg.get("quiet_hours") or ""),
         "max_per_day": scfg.get("max_per_day"),
         "counts": counts,
@@ -118,6 +131,14 @@ async def h_status(plugin) -> dict:
             "label": pid_cfg or "全局默认提供商",
         },
         "delivery_sessions": len(plugin._delivery_sessions()),
+        "anima": {
+            "installed": bool(anima.get("installed")),
+            "version": str(anima.get("version") or ""),
+            "follow_server": _bool_of(acfg.get("follow_server", False), False),
+            "server_key": str(acfg.get("server_key") or ""),
+            "active_url": str(anima.get("active_url") or ""),
+            "active_name": str(anima.get("active_name") or ""),
+        },
     })
 
 
@@ -146,11 +167,8 @@ async def h_records(plugin) -> dict:
         return err("数据库未就绪")
     offset = _qi("offset", 0, 0, 10_000_000)
     limit = _qi("limit", 50, 1, 200)
-    starred = _qi("starred", "-1")
-    try:
-        starred = int(starred)
-    except ValueError:
-        starred = -1
+    # starred: -1 = 不筛、0 = 只看未收藏、1 = 只看收藏
+    starred = _qi("starred", -1, -1, 1)
     rows, total = await plugin.store.list_records(
         status=_q("status"),
         workflow=_q("workflow"),
@@ -519,7 +537,14 @@ async def h_set_config(plugin) -> dict:
             plugin.reload_templates()
         except Exception as e:
             logger.warning(f"{PLUGIN_TAG} 模板重载失败: {e}")
+    if any(k.startswith("schedule.") for k in changed):
+        # 改了间隔/时刻/安静时段就立刻按新配置重排下次计划，别让旧时刻继续生效
+        try:
+            plugin.reschedule()
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 重算下次计划失败: {e}")
     logger.info(f"{PLUGIN_TAG} WebUI 配置已保存: {', '.join(changed)}")
+    plugin.debug_log("config", f"WebUI 保存配置：{', '.join(changed)}")
     return ok({"changed": changed})
 
 
@@ -555,6 +580,142 @@ async def h_providers(plugin) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 关联萌绘（astrbot_plugin_comfyui_anima）
+# --------------------------------------------------------------------------- #
+
+async def h_anima(plugin) -> dict:
+    """GET /anima：萌绘是否安装 / 版本 / 服务器列表 / 本插件实际会用哪个地址。"""
+    info = plugin.anima_info()
+    url, src = plugin._comfy_url()
+    acfg = plugin._sub("anima")
+    info.update({
+        "follow_server": _bool_of(acfg.get("follow_server", False), False),
+        "server_key": str(acfg.get("server_key") or ""),
+        "effective_url": url,
+        "url_source": src,
+        "manual_url": str(plugin._sub("comfyui").get("url") or ""),
+        "anima_plugin_name": "astrbot_plugin_comfyui_anima",
+    })
+    return ok(info)
+
+
+def _cfg_sub(plugin, key: str) -> dict:
+    cfg = plugin.config
+    sub = cfg.get(key) if isinstance(cfg, dict) else None
+    if not isinstance(sub, dict):
+        sub = {}
+        try:
+            cfg[key] = sub
+        except Exception:
+            return {}
+    return sub
+
+
+async def h_anima_sync(plugin) -> dict:
+    """POST {action: follow|copy|off, server_key?}
+
+    - follow：开启「跟随萌绘」（server_key 可指定某台，空 = 萌绘当前启用的那台）
+    - copy  ：把萌绘当前地址**复制**进本插件 comfyui.url（不开启跟随，之后各配各的）
+    - off   ：关闭跟随（回到本插件自己的 comfyui.url）
+    """
+    body = await _payload()
+    action = str(body.get("action") or "").strip().lower()
+    key = str(body.get("server_key") or "").strip()
+    if plugin.config is None:
+        return err("插件配置不可写")
+    info = plugin.anima_info()
+    if not info.get("installed"):
+        return err("没有找到萌绘插件（astrbot_plugin_comfyui_anima），请先安装并启用它")
+
+    acfg = _cfg_sub(plugin, "anima")
+    if action == "follow":
+        if key and not any(key in (s["key"], s["name"]) for s in info.get("servers") or []):
+            return err(f"萌绘里找不到服务器「{key}」，请刷新后重选")
+        if not info.get("servers"):
+            return err("萌绘里还没有可用的 ComfyUI 服务器（先去萌绘控制台配置）")
+        acfg["follow_server"] = True
+        acfg["server_key"] = key
+        desc = "已开启跟随萌绘的服务器地址"
+    elif action == "copy":
+        url = str(info.get("active_url") or "").strip()
+        if not url:
+            return err("没读到萌绘的服务器地址，请先在萌绘里配置")
+        cfg = plugin.config
+        comfy = _cfg_sub(plugin, "comfyui")
+        comfy["url"] = url
+        acfg["follow_server"] = False
+        desc = f"已把萌绘地址复制到本插件：{url}"
+    elif action == "off":
+        acfg["follow_server"] = False
+        desc = "已关闭跟随，改用本插件自己的服务器地址"
+    else:
+        return err("action 必须是 follow / copy / off")
+    try:
+        plugin.config.save_config()
+    except Exception as e:
+        logger.warning(f"{PLUGIN_TAG} 萌绘联动配置落盘失败: {e}")
+        return err(f"配置已改内存但落盘失败: {e}")
+    url, src = plugin._comfy_url()
+    logger.info(f"{PLUGIN_TAG} {desc}（生效地址 {url}，来源 {src}）")
+    plugin.debug_log("anima", f"{desc} → {url}")
+    return ok({"message": desc, "follow_server": bool(acfg.get("follow_server")),
+               "server_key": str(acfg.get("server_key") or ""),
+               "effective_url": url, "url_source": src})
+
+
+# --------------------------------------------------------------------------- #
+# 调试
+# --------------------------------------------------------------------------- #
+
+async def h_debug_env(plugin) -> dict:
+    """GET /debug/env：一次看清楚各目录、生效地址、投递名单与模板状态。"""
+    url, src = plugin._comfy_url()
+    return ok({
+        "comfy_url": url,
+        "comfy_url_source": src,
+        "manual_url": str(plugin._sub("comfyui").get("url") or ""),
+        "gallery_dir": str(plugin.gallery_dir or ""),
+        "workflows_dir": str(plugin.workflows_dir or ""),
+        "db_path": str(getattr(plugin.store, "path", "") or ""),
+        "delivery_sessions": plugin._delivery_sessions(),
+        "templates": [t.to_public() for t in plugin._templates],
+        "selection_mode": str(plugin._cfg().get("workflow_selection") or "random"),
+        "queue_defer_threshold": plugin._int_of(
+            plugin._sub("comfyui"), "queue_defer_threshold", 2, lo=0, hi=100
+        ),
+        "log_capacity": len(plugin._logs),
+    })
+
+
+async def h_debug_comfy(plugin) -> dict:
+    """POST {url?}：探活 + 读队列（空地址 = 测当前生效地址，不写配置）。"""
+    body = await _payload()
+    res = await plugin.debug_comfy(str(body.get("url") or ""))
+    return ok(res)
+
+
+async def h_debug_llm(plugin) -> dict:
+    """POST {theme?}：真跑一次「抽签 → LLM → 尺寸落值」，不提交 ComfyUI、不写库。"""
+    body = await _payload()
+    theme = str(body.get("theme") or "").strip()[:50]
+    return ok(await plugin.debug_llm(theme))
+
+
+async def h_debug_delivery(plugin) -> dict:
+    """POST {umo, text?}：往指定会话发一条测试消息（不进投递名单、不写记录）。"""
+    body = await _payload()
+    res = await plugin.debug_delivery(
+        str(body.get("umo") or ""), str(body.get("text") or "")[:300]
+    )
+    return ok(res)
+
+
+async def h_debug_logs(plugin) -> dict:
+    """GET /debug/logs?limit=120：内存环形日志（倒序：最新在前）。"""
+    return ok({"rows": plugin.debug_logs(_qi("limit", 120, 1, 400))})
+
+
+# --------------------------------------------------------------------------- #
 # 注册
 # --------------------------------------------------------------------------- #
 
@@ -575,6 +736,13 @@ def register(plugin) -> None:
         ("/config", h_get_config, ["GET"]),
         ("/config", h_set_config, ["POST"]),
         ("/providers", h_providers, ["GET"]),
+        ("/anima", h_anima, ["GET"]),
+        ("/anima/sync", h_anima_sync, ["POST"]),
+        ("/debug/env", h_debug_env, ["GET"]),
+        ("/debug/comfy", h_debug_comfy, ["POST"]),
+        ("/debug/llm", h_debug_llm, ["POST"]),
+        ("/debug/delivery", h_debug_delivery, ["POST"]),
+        ("/debug/logs", h_debug_logs, ["GET"]),
     ]
     for path, fn, methods in routes:
         plugin.context.register_web_api(

@@ -70,52 +70,78 @@
     "default": {}
   },
   "schedule": {
-    "description": "定时计划",
+    "description": "定时计划（什么时候画）",
     "type": "object",
-    "hint": "interval=每 N 小时一张（带抖动）；daily=每天固定时刻列表",
+    "hint": "两种模式二选一：按间隔循环，或每天在固定时刻画。WebUI「调度」页有图形化编辑，比改这里直观",
     "items": {
       "mode": {
         "description": "调度模式",
         "type": "string",
         "options": ["interval", "daily"],
         "default": "interval",
-        "hint": "interval=固定间隔；daily=每日时刻"
+        "hint": "interval=隔一段时间画一张（带随机浮动）；daily=每天在指定时刻画"
       },
       "interval_minutes": {
-        "description": "间隔分钟",
+        "description": "生成间隔（分钟）",
         "type": "int",
         "default": 360,
-        "hint": "interval 模式：每 N 分钟定时生成一张（最低 1，建议 ≥5——单张通常要画几十秒）。默认 360 = 每 6 小时。间隔调小后记得同步调大「每日上限」"
+        "hint": "仅 interval 模式生效，最低 1 分钟。360 = 每 6 小时，30 = 每半小时。间隔调小后记得同步调大「每日上限」"
       },
       "jitter_minutes": {
-        "description": "抖动分钟",
+        "description": "随机浮动（分钟）",
         "type": "int",
         "default": 30,
-        "hint": "interval 模式：间隔上随机加 0~N 分钟，避免整点机械感；daily 模式不生效"
+        "hint": "仅 interval 模式生效：在间隔上随机多加 0~N 分钟，避免整点机械感；0 = 不浮动"
       },
       "daily_times": {
-        "description": "每日时刻表",
+        "description": "每日时刻（逗号分隔）",
         "type": "string",
         "default": "09:30,20:00",
-        "hint": "daily 模式：逗号分隔的时刻，如 09:30,20:00"
+        "hint": "仅 daily 模式生效，24 小时制，如 09:30,20:00"
+      },
+      "quiet_enabled": {
+        "description": "启用安静时段",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，安静时段内到点会跳过（顺延到下个计划点），而不是把时间清空——想临时关掉只关这个开关，别删时间"
       },
       "quiet_hours": {
-        "description": "安静时段",
+        "description": "安静时段（HH:MM-HH:MM）",
         "type": "string",
         "default": "01:00-08:00",
-        "hint": "此时间段不生成不投递，格式 HH:MM-HH:MM（支持跨零点），留空关闭"
+        "hint": "支持跨零点，如 23:00-07:00；关闭上面的开关时此项自动失效，无需清空"
       },
       "max_per_day": {
-        "description": "每日上限",
+        "description": "每日上限（0 = 不限）",
         "type": "int",
         "default": 4,
-        "hint": "定时生成每天最多几张（手动 /绘卷 画一张 不受限），0 = 不限"
+        "hint": "定时生成每天最多几张（手动 /绘卷 画一张 不受限）；0 = 不限"
       },
       "paused_manual": {
         "description": "手动暂停标记",
         "type": "bool",
         "default": false,
         "hint": "由 /绘卷 暂停|继续 与 WebUI 控制，一般不用手改"
+      }
+    },
+    "default": {}
+  },
+  "anima": {
+    "description": "关联萌绘插件",
+    "type": "object",
+    "hint": "可选联动：直接复用 ComfyUI萌绘（astrbot_plugin_comfyui_anima）里配置的服务器地址，免去两处填同一个 URL；状态与调试在 WebUI「关联萌绘」页",
+    "items": {
+      "follow_server": {
+        "description": "跟随萌绘的服务器地址",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后每次出图都现读萌绘当前启用的服务器地址；萌绘未安装 / 未配置时自动回落到下方「ComfyUI 服务器」里的地址"
+      },
+      "server_key": {
+        "description": "指定萌绘的服务器",
+        "type": "string",
+        "default": "",
+        "hint": "填萌绘服务器列表里的唯一 key 或名字；留空 = 用萌绘里「设为默认」的那台"
       }
     },
     "default": {}

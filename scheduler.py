@@ -80,6 +80,27 @@ def in_quiet_hours(now_t: dtime, span: "tuple[dtime, dtime] | None") -> bool:
     return now_t >= start or now_t < end
 
 
+def _truthy(v, default: bool = True) -> bool:
+    """配置布尔容错：bool / "true"/"1"/"on" 为真；None/空为默认。"""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
+
+
+def quiet_span_of(cfg: dict) -> "tuple[dtime, dtime] | None":
+    """安静时段开关 + 时间串 → 生效区间。
+
+    这条规则是用户明确要求的：**关掉安静时段用开关，不要靠清空时间**。
+    开关关闭时即使时间串还在也一律不生效（下次打开立即恢复原时间）。
+    """
+    cfg = cfg or {}
+    if not _truthy(cfg.get("quiet_enabled", True), True):
+        return None
+    return parse_quiet_hours(cfg.get("quiet_hours"))
+
+
 def parse_daily_times(text: str) -> list[tuple[int, int]]:
     """解析 "09:30,20:00" → [(9,30),(20,0)]；非法项丢弃。"""
     out = []
@@ -195,7 +216,7 @@ async def run_loop(plugin) -> None:
             if state.next_due is None:
                 state.next_due = initial_due(cfg, now, rng)
             if now >= state.next_due:
-                quiet = parse_quiet_hours(cfg.get("quiet_hours"))
+                quiet = quiet_span_of(cfg)
                 if quiet and in_quiet_hours(now.time(), quiet):
                     # 安静时段到点：跳过本次，顺延下个计划点（从原 due 起算）
                     state.next_due = advance(cfg, state.next_due, rng)

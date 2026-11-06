@@ -1,12 +1,191 @@
 # 萌萌绘卷（astrbot_plugin_moe_paint）
 
-> 状态：**PRD 阶段，未动工**。PRD 见工作区 `docs/astrbot_plugin_moe_paint_PRD.md`（跨插件文档，不入本仓库，动工时在本仓库 `docs/` 落架构要点）。
+> 让 bot **自己挑题材、自己写提示词、定时画成卷**：LLM 负责「画什么、怎么画」，ComfyUI 负责画，
+> 白名单会话负责收，插件内置的图库 WebUI 负责把每一张连同「创作简报 / 提示词 / 失败原因」一起记下来。
 
-定时自动绘图插件：按计划（固定间隔 / 每日时刻）用 LLM 生成高质量提示词与尺寸，
-选定工作流交给 ComfyUI 出图，成功后投递到白名单群聊/私聊；每次生成全量记录落库，
-配图库 WebUI（模型控制台同款插件 Page 形态）。
-
-- **不依赖萌绘（astrbot-comfyui-anima）**：直连 ComfyUI HTTP API（客户端改编自萌绘的
-  零依赖 `comfyui_client.py`，AGPL-3.0 同源，文件头注明出处）；两者共享同一台 ComfyUI 服务器时串行排队。
-- LICENSE：AGPL-3.0（跟随萌绘同源代码要求）。
+- 适用：AstrBot `>= 4.28`，一个可访问的 ComfyUI 服务器（本地或中转站均可）。
+- 许可证：AGPL-3.0（ComfyUI 客户端改编自同作者的 `astrbot-comfyui-anima`，同源署名见 `comfy_client.py` 文件头）。
 - 作者：云端之风 <1479221500@qq.com>（windExplorer）
+
+---
+
+## 一、它能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 定时自动出图 | 两种节奏：**按间隔**（每 N 分钟 / 小时 / 天，可加随机浮动）或**每天固定时刻**（如 09:30、20:00） |
+| 多样性提示词 | 插件先分层抽签（类别 → 题材 → 风格 → 构图 → 光色 → 氛围），LLM 只把「创作简报」写成提示词，避免千篇一律的美少女半身像 |
+| 尺寸白名单 | LLM 不报数字宽高，只按构图朝向从工作流模板的尺寸预设里取值（16 对齐） |
+| 工作流轮换 | 多份 ComfyUI API 格式工作流，随机或按顺序轮换；节点定位自动完成，异形链路可手工覆盖 |
+| 静默投递 | 生成完直接发到白名单会话（`StarTools.send_message`，不走事件管线，不触发其他插件） |
+| 生成记录图库 | 每轮（含失败）全量落库；图片按 sha256 内容寻址归档，容量超限按最旧淘汰，收藏永不淘汰 |
+| 控制台 WebUI | 总览 / 图库 / 调度 / 投递 / 生成服务 / 工作流 / 主题词池 / 关联萌绘 / 调试，九个页面 |
+| 关联萌绘 | 可选：直接复用 **ComfyUI萌绘** 里配好的 ComfyUI 服务器地址，免去两处填同一个 URL |
+| 调试工具 | ComfyUI 连通性与队列、LLM 试跑（看简报 / 原始返回 / 耗时）、投递自检、内存事件日志 |
+
+---
+
+## 二、和 ComfyUI萌绘（astrbot-comfyui-anima）的关系
+
+**不取代、不强依赖**：萌绘管「人叫它画」，绘卷管「自己定期画」。
+
+- 绘卷直连 ComfyUI 的 HTTP API（`/prompt`、`/history`、`/view`、`/queue`），**不调用**萌绘的绘图接口 —— 萌绘升级不会把绘卷一起弄坏。
+- 可选联动：在「关联萌绘」页开启 **跟随萌绘的服务器** 后，绘卷每次出图都现读萌绘当前启用的那台 ComfyUI 地址；萌绘换地址，绘卷自动跟上。
+- 两边共用同一台服务器时，绘卷的 **队列避让**（`comfyui.queue_defer_threshold`，默认 2）会在提交前查远程队列，前方任务多就顺延 5 分钟，给萌绘的交互出图让路。
+- 工作流模板、图库、提示词风格、模型配置**各自独立**，互不读写。
+
+---
+
+## 三、安装
+
+1. 把 `astrbot_plugin_moe_paint` 目录放到 AstrBot 的 `data/plugins/` 下（或用插件市场 / 上传 zip 安装）。
+2. 确认依赖已装：`pip install -r requirements.txt`（只有 `aiohttp` / `aiosqlite`；`Pillow` 可选，装了缩略图更快更小）。
+3. 在 AstrBot 后台「插件管理」里启用，然后：
+   - 打开插件配置，填 **ComfyUI 服务器地址**（或去「关联萌绘」页跟随萌绘）；
+   - 选一个 **提示词模型**（留空 = 全局默认对话模型）；
+   - 设置调度（默认每 6 小时 ±30 分钟，安静时段 01:00–08:00，每日上限 4 张）。
+4. 打开插件页「萌萌绘卷 · 控制台」，在「总览」点 **立即画一张** 验证整条链路。
+
+> 首次启动会把内置起步工作流 `builtin/anima_t2i.json` 复制到
+> `data/plugin_data/astrbot_plugin_moe_paint/workflows/`，开箱即可出图。
+> 用别的模型/工作流时，把 ComfyUI「导出 (API)」得到的 JSON 丢进同目录，再到控制台「工作流模板」登记。
+
+---
+
+## 四、指令
+
+| 指令 | 行为 |
+| --- | --- |
+| `/绘卷` | 状态概览：调度状态、下次生成时间、今日与累计张数、模板与投递情况 |
+| `/绘卷 暂停` / `/绘卷 继续` | 管理员：暂停 / 恢复调度（不动配置） |
+| `/绘卷 画一张 [主题词]` | 立即生成一张并直发当前会话；主题词可空（随机抽签） |
+| `/绘卷 投递 开启` / `关闭` | 管理员：把当前会话加入 / 移出定时投递名单 |
+| `/绘卷 帮助` | 帮助文本 |
+
+---
+
+## 五、控制台（WebUI）
+
+插件页按「左侧导航 + 右侧内容」组织，九个页面：
+
+| 页面 | 内容 |
+| --- | --- |
+| 总览 | 下次生成倒计时、今日 / 累计 / 成功率、最近的图与事件、工作流健康、立即画一张 |
+| 图库 | 状态 / 工作流 / 类别 / 关键词 / 只看收藏筛选；网格缩略图；详情抽屉（全元数据、复制提示词与 seed、收藏、重投、删除） |
+| 调度计划 | 图形化设置：模式二选一（间隔 / 每天时刻）、间隔单位换算、安静时段开关、每日上限开关、保存即重算下次计划 |
+| 投递 | 会话名单（UMO，每行一个）、附带文案开关与模板、发测试消息 |
+| 生成服务 | ComfyUI 地址与等待预算、队列避让阈值、提示词模型与超时、图库容量、管理员通知 |
+| 工作流模板 | 模板清单编辑（名称 / 文件 / 标签风格 / 尺寸预设 / 默认负面词 / 启用）、校验状态、节点覆盖项 |
+| 主题词池 | 停用类别、词池扩充（追加题材 / 新增类别 / 风格·光色·氛围·构图） |
+| 关联萌绘 | 萌绘是否安装与版本、服务器列表（只读）、跟随 / 复制地址 / 关闭跟随、连接测试 |
+| 调试与日志 | 运行环境快照、ComfyUI 连通性与队列、LLM 试跑、投递自检、事件日志 |
+
+### 调度页的三个「开关」约定
+
+用户明确要求：**停用某项功能用开关，不要靠清空输入框**。
+
+- **安静时段**：右上角开关关掉后，时间设置原样保留但一律不生效（下次打开立即恢复原时间），不会再出现「清空了时间以为关了、其实还在跑」或反过来的困惑。
+- **随机浮动**：关掉即准点，分钟数保留。
+- **每日上限**：关掉即不限张数（等价于 0，但不用记住这个约定）。
+
+---
+
+## 六、配置项速查（`_conf_schema.json`）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 调度总开关（关掉后手动「立即画一张」仍可用） |
+| `comfyui.url` | `http://127.0.0.1:8188` | ComfyUI 地址（开启跟随萌绘时此项不生效） |
+| `comfyui.draw_timeout` | `180` | 单张基础等待（秒） |
+| `comfyui.queue_extra_timeout` | `60` | 队列前方每有一个任务多等的秒数 |
+| `comfyui.hard_cap` | `600` | 等待硬上限（秒） |
+| `comfyui.poll_interval` | `2` | 轮询 `/history` 的间隔（秒） |
+| `comfyui.queue_defer_threshold` | `2` | 定时出图前查队列，前方 ≥ N 个任务就顺延 5 分钟；`0` = 关闭避让 |
+| `llm.provider_id` | 空 | 指定提示词用的提供商 id；空 = AstrBot 全局默认 |
+| `llm.timeout` | `45` | LLM 调用超时（秒） |
+| `schedule.mode` | `interval` | `interval` 按间隔 / `daily` 每天时刻 |
+| `schedule.interval_minutes` | `360` | 间隔（分钟，最低 1） |
+| `schedule.jitter_minutes` | `30` | 间隔上随机追加 0~N 分钟；`0` = 不浮动 |
+| `schedule.daily_times` | `09:30,20:00` | daily 模式的时刻表（逗号分隔） |
+| `schedule.quiet_enabled` | `true` | **安静时段开关**（关掉后 `quiet_hours` 自动失效） |
+| `schedule.quiet_hours` | `01:00-08:00` | 安静时段，支持跨零点（23:00-07:00） |
+| `schedule.max_per_day` | `4` | 每日定时出图上限；`0` = 不限 |
+| `schedule.paused_manual` | `false` | 手动暂停标记（由指令 / 控制台维护） |
+| `anima.follow_server` | `false` | 跟随萌绘的 ComfyUI 服务器地址 |
+| `anima.server_key` | 空 | 指定萌绘的哪台服务器；空 = 萌绘当前启用的那台 |
+| `workflow_selection` | `random` | `random` 随机 / `round_robin` 顺序轮换 |
+| `workflow_templates` | 内置一个 | 模板清单（名称 / 文件 / 标签风格 / 尺寸预设 / 默认负面词 / 启用 / 节点覆盖） |
+| `theme.disabled_categories` | 空 | 停用的类别名（逗号分隔） |
+| `theme.extra_words` | 空 | 词池扩充：`类别=词1,词2`，或 `风格/光色/氛围/构图` |
+| `delivery.sessions` | `[]` | 投递会话 UMO 列表；**空 = 只入库不投递** |
+| `delivery.caption_on` | `true` | 投图时是否附带一句话 |
+| `delivery.caption_template` | `{caption}` | 占位符：`{caption} {category} {subject} {workflow}` |
+| `gallery.max_total_mb` | `1024` | 图库容量上限（MB），超限按最旧淘汰非收藏图；`0` = 不淘汰 |
+| `admin_notify_umo` | 空 | 连续失败自动暂停时的通知目标会话 |
+
+---
+
+## 七、数据目录
+
+全部落在 `data/plugin_data/astrbot_plugin_moe_paint/`（插件安装目录每次更新会被清空，故不放那里）：
+
+```
+moe_paint.db          # 记录库（generations 表 + 少量 meta）
+gallery/YYYY-MM/      # 生成图，文件名 = sha256 前 16 位
+workflows/            # 工作流模板 JSON（含首启复制的 builtin/anima_t2i.json）
+```
+
+每条记录（包括失败行）都有：时间、触发来源、类别、创作简报、正负向提示词、宽高、seed、
+ComfyUI 任务 id、耗时、错误原因、投递结果、收藏标记。
+
+---
+
+## 八、提示词工程（为什么不容易「画腻」）
+
+1. **分层抽签**：类别、题材、风格、构图、光色、氛围每层独立随机 → 组成一句「创作简报」。
+2. **LLM 只做转写**：系统提示词按模板的 `tag_style` 切换（`danbooru` 走英文标签串、`natural` 走中文自然语言），要求严格输出 `{"prompt","negative","caption"}`；不合契约会带原因重试一次。
+3. **尺寸不由模型定**：构图层的朝向决定从模板尺寸白名单里取哪一档（超广角/俯瞰/全景取最极端长宽比）。
+4. **可调词池**：控制台「主题词池」可停用整类、追加题材、新增自定义类别、追加风格/光色/氛围/构图。
+
+---
+
+## 九、排障
+
+| 现象 | 先看哪里 |
+| --- | --- |
+| 到点没出图 | 「总览」的「当前计划」与「最近事件」；再核对总开关、是否暂停、是否在安静时段、是否达每日上限 |
+| 一直失败 | 「图库」筛选状态=失败看错误；或「调试」页 LLM 试跑看契约是否合规 |
+| ComfyUI 连不上 | 「调试」页 ComfyUI 连通性（含队列）；核对地址是否含 `http://`；跟随萌绘时看萌绘里的服务器是否可用 |
+| 模板校验失败 | 「工作流模板」页红字提示；多半是缺 JSON 文件，或采样器链路异形需要填节点覆盖 |
+| 投递收不到 | 「投递」页发测试消息；UMO 平台 id 必须与适配器实例一致（`platform id ≠ 适配器类型名` 是最常见坑） |
+| 改了配置没生效 | 调度相关保存后会自动重算下次计划；其他配置下一次出图即生效（每轮现读配置） |
+
+---
+
+## 十、开发
+
+```powershell
+# 前端（源码 webui-src/ → 产物 pages/moe-paint/，产物不入库，打包时现场构建）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_webui.ps1
+
+# 打包（显式 includeList + 顶层 .py 守卫；产物 dist/astrbot_plugin_moe_paint_v<版本>.zip）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_zip.ps1
+```
+
+纯函数自检（不需要 AstrBot 运行时）：
+
+```text
+uv run --no-project --python 3.12 python tests/test_prompter.py
+uv run --no-project --python 3.12 python tests/test_workflow_mgr.py
+uv run --no-project --python 3.12 python tests/test_scheduler.py
+uv run --no-project --python 3.12 --with aiosqlite python tests/test_store.py
+uv run --no-project --python 3.12 python tests/test_schema.py
+```
+
+`test_schema.py` 复刻了 AstrBot 装载期的 schema 解析规则（每个节点必须有合法 `type`、
+`object` 必须有 `items`）—— 少一个 `type` 就会让插件装不上，且本地只测业务代码发现不了。
+
+模块一览：`main.py`（生命周期 / 调度装配 / 指令 / 萌绘联动）、`scheduler.py`（调度判定与循环）、
+`prompter.py`（抽签 + 契约 + 尺寸）、`workflow_mgr.py`（模板加载 / 注水 / 轮换）、
+`comfy_client.py`（ComfyUI HTTP）、`gallery_store.py`（sqlite + 归档 + LRU）、
+`delivery.py`（投递）、`webui_api.py`（控制台接口）。
