@@ -90,6 +90,49 @@ async def main() -> None:
         check("meta_roundtrip", await store.get_meta("rr_cursor") == "3")
         check("meta_default", await store.get_meta("none", "x") == "x")
 
+        # v0.7.8：meta 前缀列表 / 删除（提示词收藏放这儿）
+        await store.set_meta("preset:测试", '{"prompt": "1girl"}')
+        await store.set_meta("preset:另一个", '{"prompt": "scenery"}')
+        kv = await store.list_meta("preset:")
+        check("meta_list_prefix", len(kv) == 2, str(kv))
+        await store.delete_meta("preset:测试")
+        check("meta_delete", len(await store.list_meta("preset:")) == 1)
+
+        # v0.7.8：质检分落库 + 统计
+        await store.update_generation(rid, score=88, score_reason="小瑕疵")
+        rec = await store.get_record(rid)
+        check("score_written", rec["score"] == 88 and rec["score_reason"] == "小瑕疵", str(rec["score"]))
+        st2 = await store.stats()
+        check("stats_score_avg", st2["score_avg"] == 88.0 and st2["score_count"] == 1, str(st2["score_avg"]))
+        check("stats_score_low", st2["score_low"] == 0, str(st2["score_low"]))
+
+        # v0.7.8：空图体检（体积兜底一定生效；像素判断要 Pillow）
+        check("blank_empty", gallery_store.suspect_blank(b"") != "")
+        check("blank_too_small", "过小" in gallery_store.suspect_blank(b"x" * 100))
+        try:
+            import io as _io
+            import os as _os
+
+            from PIL import Image
+
+            # 1024² 才能越过「文件过小」的体积闸门（纯色 PNG 压缩率极高）
+            buf = _io.BytesIO()
+            Image.new("RGB", (1024, 1024), (0, 0, 0)).save(buf, format="PNG")
+            check("blank_all_black", "全黑" in gallery_store.suspect_blank(buf.getvalue()),
+                  gallery_store.suspect_blank(buf.getvalue()))
+            buf2 = _io.BytesIO()
+            Image.new("RGB", (1024, 1024), (128, 128, 128)).save(buf2, format="PNG")
+            check("blank_solid_color", "单色" in gallery_store.suspect_blank(buf2.getvalue()),
+                  gallery_store.suspect_blank(buf2.getvalue()))
+            # 正常图（有内容）不应被误判
+            buf3 = _io.BytesIO()
+            noise = Image.frombytes("RGB", (256, 256), _os.urandom(256 * 256 * 3))
+            noise.save(buf3, format="PNG")
+            check("blank_normal_ok", gallery_store.suspect_blank(buf3.getvalue()) == "",
+                  gallery_store.suspect_blank(buf3.getvalue()))
+        except ImportError:
+            print("  skip  blank_pixels（本环境没有 Pillow）")
+
         # v0.7.2：重启后要靠它恢复「上一张是什么时候」
         last_ts = await store.last_generation_ts()
         check("last_ts_positive", last_ts >= 1000, str(last_ts))

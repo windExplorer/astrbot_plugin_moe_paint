@@ -361,5 +361,54 @@ check("workflow_scope_resolved",
       workflow_mgr.resolve_scope(
           workflow_mgr.workflow_scope_for({"name": "其它"}, {}, "auto"), "anime") == "anime")
 
+# ---------- v0.7.8：采样器定位 / 参数注入 / 精修图 ----------
+check("locate_sampler", info.get("sampler") == "6", str(info.get("sampler")))
+
+ov = workflow_mgr.inject(
+    tpl.wf, info, "p", "n", 1024, 1024, 9, overrides={"steps": 28, "cfg": 6.0, "sampler_name": "euler"}
+)
+check("inject_steps", ov["6"]["inputs"]["steps"] == 28, str(ov["6"]["inputs"]))
+check("inject_cfg", ov["6"]["inputs"]["cfg"] == 6.0, str(ov["6"]["inputs"]))
+check("inject_sampler_name", ov["6"]["inputs"]["sampler_name"] == "euler", str(ov["6"]["inputs"]))
+# 工作流里没有的字段不硬塞（异形采样链会被 ComfyUI 直接拒绝）
+wf_nosched = {
+    "1": {"class_type": "KSampler", "inputs": {
+        "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0],
+        "seed": 1, "steps": 20, "cfg": 7.0, "sampler_name": "euler", "denoise": 1.0,
+    }},
+    "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "a"}},
+    "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "b"}},
+    "4": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512}},
+}
+info_ns = workflow_mgr.locate_nodes(wf_nosched)
+out_ns = workflow_mgr.inject(
+    wf_nosched, info_ns, "p", "n", 512, 512, 5,
+    overrides={"scheduler": "karras", "steps": 30},
+)
+check("inject_missing_field_untouched",
+      "scheduler" not in out_ns["1"]["inputs"] and out_ns["1"]["inputs"]["steps"] == 30,
+      str(out_ns["1"]["inputs"]))
+
+pr = workflow_mgr.params_for_entry({"params_preset": "high"})
+check("params_preset_high", pr == {"steps": 36, "cfg": 6.5}, str(pr))
+pr2 = workflow_mgr.params_for_entry({"params_preset": "keep", "sampler_name": "dpmpp_2m"})
+check("params_keep_only_explicit", pr2 == {"sampler_name": "dpmpp_2m"}, str(pr2))
+pr3 = workflow_mgr.params_for_entry({"params_preset": "fast", "steps": 12})
+check("params_explicit_overrides_preset", pr3["steps"] == 12 and pr3["cfg"] == 5.0, str(pr3))
+check("params_empty", workflow_mgr.params_for_entry({}) == {})
+
+refine = workflow_mgr.build_refine_workflow(
+    image_name="a.png", ckpt_name="m.safetensors", positive="p", negative="n",
+    scale=1.5, denoise=0.35, steps=20, cfg_scale=5.0, seed=7,
+)
+check("refine_nodes", set(refine) == {str(i) for i in range(1, 10)}, str(sorted(refine)))
+check("refine_load_image", refine["2"]["inputs"]["image"] == "a.png")
+check("refine_ckpt", refine["1"]["inputs"]["ckpt_name"] == "m.safetensors")
+check("refine_denoise", refine["7"]["inputs"]["denoise"] == 0.35)
+check("refine_scale_clamped", workflow_mgr.build_refine_workflow(
+    "a.png", "m", "p", "n", scale=9.0)["3"]["inputs"]["scale_by"] == 2.0)
+check("refine_negative_wired",
+      refine["7"]["inputs"]["negative"] == ["6", 0] and refine["6"]["inputs"]["text"] == "n")
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

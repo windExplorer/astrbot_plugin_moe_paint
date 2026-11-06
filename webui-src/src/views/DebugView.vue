@@ -307,7 +307,18 @@ onMounted(async () => {
             </n-tag>
             <n-tag size="small" :bordered="false">LLM {{ fmtDur(llmRes.llm_ms) }}</n-tag>
             <n-tag size="small" :bordered="false">总 {{ fmtDur(llmRes.total_ms) }}</n-tag>
+            <n-tag
+              v-if="llmRes.tag_count"
+              size="small"
+              :bordered="false"
+              :type="llmRes.tag_count > 75 ? 'warning' : 'default'"
+            >
+              标签 {{ llmRes.tag_count }}
+            </n-tag>
             <span class="mp-sub">{{ llmRes.llm_provider }}</span>
+          </div>
+          <div v-if="llmRes.args_note" class="mp-err" style="margin-top: 6px">
+            指令参数：{{ llmRes.args_note }}
           </div>
 
           <div v-if="llmRes.brief" class="brief">

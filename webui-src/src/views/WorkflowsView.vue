@@ -34,6 +34,7 @@ interface TmplRow {
   file: string;
   tag_style: string;
   size_preset: string;
+  params_preset: string;
   prompt_profile: string;
   subject_scope: string;
   default_negative: string;
@@ -138,6 +139,13 @@ const presetOptions = [
   { label: "qwen · 1664×928 / 928×1664 / 1328²", value: "qwen" },
 ];
 const localPresetOptions = presetOptions.filter((o) => o.value !== "follow");
+/** 采样参数档（v0.7.8）：keep = 什么都不改 */
+const paramsPresetOptions = [
+  { label: "沿用工作流原参数", value: "keep" },
+  { label: "快出 · 20 步 / CFG 5", value: "fast" },
+  { label: "标准 · 28 步 / CFG 6", value: "standard" },
+  { label: "精修 · 36 步 / CFG 6.5", value: "high" },
+];
 
 // 上传
 const jsonText = ref("");
@@ -170,6 +178,7 @@ function normalizeRow(r: any): TmplRow {
     file: String(r?.file || ""),
     tag_style: String(r?.tag_style || "danbooru"),
     size_preset: String(r?.size_preset || "sdxl"),
+    params_preset: String(r?.params_preset || "keep"),
     prompt_profile: String(r?.prompt_profile || "auto"),
     subject_scope: String(r?.subject_scope || "auto"),
     default_negative: String(r?.default_negative || ""),
@@ -360,6 +369,7 @@ async function save() {
     file: r.file.trim(),
     tag_style: r.tag_style,
     size_preset: r.size_preset,
+    params_preset: r.params_preset,
     prompt_profile: r.prompt_profile,
     subject_scope: r.subject_scope,
     default_negative: r.default_negative,
@@ -906,6 +916,13 @@ onMounted(reloadAll);
             <span class="label">尺寸预设</span>
             <n-select v-model:value="r.size_preset" :options="localPresetOptions" size="small" />
             <span class="mp-sub">自动识别到底模时会被覆盖</span>
+          </label>
+          <label class="mp-field">
+            <span class="label">采样参数档</span>
+            <n-select v-model:value="r.params_preset" :options="paramsPresetOptions" size="small" />
+            <span class="mp-sub">
+              只覆盖工作流采样器上真有的字段（步数/CFG）；带 turbo 的图别调到「精修」
+            </span>
           </label>
           <label class="mp-field mp-field--wide">
             <span class="label">默认负面词</span>

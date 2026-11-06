@@ -35,6 +35,8 @@ from . import (
 
 PLUGIN_NAME = "astrbot_plugin_moe_paint"
 PLUGIN_TAG = "[萌萌绘卷]"
+# 提示词收藏在 meta 表里的键前缀（preset:<名字>）——不占主表列，删改都轻
+PRESET_PREFIX = "preset:"
 # 关联萌绘（ComfyUI萌绘）的插件名：只读它的配置取服务器地址，不调用其内部接口
 ANIMA_PLUGIN_NAME = "astrbot_plugin_comfyui_anima"
 
@@ -43,6 +45,7 @@ HELP_TEXT = (
     "/绘卷              看状态\n"
     "/绘卷 暂停|继续     管理员：暂停/恢复调度\n"
     "/绘卷 画一张 [主题]  立即生成一张发到本会话（主题词可选）\n"
+    "  可带开关：--no 模糊,水印  --style 胶片  --ratio 3:2  --seed 42\n"
     "/绘卷 投递 开启|关闭 管理员：本会话是否接收定时投递\n"
     "/绘卷 帮助          本帮助"
 )
@@ -54,7 +57,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.7",
+    "v0.7.8",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -754,13 +757,22 @@ class MoePaintPlugin(Star):
             )
             payload = prompter.parse_llm_payload(text)
         payload["_raw"] = text[:4000]
-        # 人物锚定是硬约束（补人物标签 + 排除负面词），先于质量词落地；
-        # 质量词由 apply_quality_prefix 放到最前，故两者不会互相覆盖。
+        # v0.7.8 落地顺序（每一步都只用前面已确定的字段，互不覆盖）：
+        # ① 按风格清洗 LLM 输出：danbooru 解权重 / 转义括号 / 去重 / 去 artist / 裁标签，
+        #    并把禁词从正向剔掉、写进负向；
+        # ② 人物锚定（补人物标签 + 排除负面词）；
+        # ③ 画风锚定（在 apply_persona 内部）；
+        # ④ 质量词放最前（系统提示里承诺「由系统添加」，这里真正落地）；
+        # ⑤ 通用负面基线垫到负向最前（LLM 给空串时也有兜底）。
+        payload = prompter.normalize_payload(payload, tpl.tag_style, opts)
         payload = prompter.apply_persona(payload, tpl.tag_style, brief, opts, scope)
-        # danbooru 系补质量词（系统提示里承诺「由系统添加」，这里真正落地）
-        payload["prompt"] = prompter.apply_quality_prefix(
-            payload.get("prompt", ""), getattr(tpl, "quality_prefix", "")
-        )
+        quality = str(getattr(tpl, "quality_prefix", "") or "").strip()
+        extra_q = str(opts.get("quality_extra") or "").strip()
+        if extra_q:
+            quality = f"{quality}, {extra_q}".strip(", ") if quality else extra_q
+        payload["prompt"] = prompter.apply_quality_prefix(payload.get("prompt", ""), quality)
+        payload = prompter.apply_negative_base(payload, tpl.tag_style, opts)
+        payload["_tag_count"] = len(prompter.split_tag_list(payload.get("prompt", "")))
         return payload, label, (time.monotonic() - t0) * 1000
 
     async def debug_llm(self, theme: str = "") -> dict:
@@ -788,9 +800,14 @@ class MoePaintPlugin(Star):
                 scope=getattr(tpl, "scope", "both"),
                 scopes=self._category_scopes(),
             )
-            if str(theme or "").strip():
+            args = prompter.parse_draw_args(theme)
+            if args["theme"]:
                 brief["category"] = "自定义"
-                brief["subject"] = str(theme).strip()[:50]
+                brief["subject"] = args["theme"][:50]
+            if args["style"]:
+                brief["style"] = args["style"]
+            if args["orientation"]:
+                brief["orientation"] = args["orientation"]
             out["brief"] = brief
             tag_style = tpl.tag_style if tpl else "danbooru"
             out["tag_style"] = tag_style
@@ -798,11 +815,16 @@ class MoePaintPlugin(Star):
             out["template"] = tpl.name if tpl else "（无可用模板，仅测提示词）"
             sizes = tpl.sizes if tpl else prompter.SIZE_PRESETS["sdxl"]
             payload, label, ms = await self._llm_prompt(brief, tpl or workflow_mgr.Template(name="", file=""))
-            width, height = prompter.pick_size(sizes, brief["orientation"], brief["composition"], _PICK_RANDOM)
+            width, height = prompter.pick_size(
+                sizes, brief["orientation"], brief["composition"], _PICK_RANDOM,
+                ratio=args.get("ratio"),
+            )
             out.update(
                 ok=True, prompt=payload.get("prompt", ""), negative=payload.get("negative", ""),
                 caption=payload.get("caption", ""), raw=payload.get("_raw", ""),
                 llm_provider=label, llm_ms=round(ms, 1), size={"width": width, "height": height},
+                tag_count=int(payload.get("_tag_count") or 0),
+                args_note=str(args.get("error") or ""),
             )
             self.debug_log("llm", f"试跑成功（{label}，{ms / 1000:.1f}s，{width}x{height}）")
         except Exception as e:
@@ -1114,11 +1136,138 @@ class MoePaintPlugin(Star):
             return False
         return self.spawn(self.generate_one(reason=f"manual:{source}", theme=theme)) is not None
 
-    async def generate_one(self, reason: str = "schedule", theme: str = "", event: "AstrMessageEvent | None" = None) -> dict:
-        """完整跑一轮：抽签 → LLM → 注入 → 出图 → 归档 → 投递。
+    # ------------------------------------------------------------------ #
+    # 重画 / 提示词收藏（v0.7.8）
+    # ------------------------------------------------------------------ #
 
-        返回 {"ok": bool, "id": int, "error": str, "skipped": bool, "image_path": str}。
-        任何一步失败都落 failed 记录（图库可查死因），不往会话刷错误。
+    async def redraw_record(self, rec_id: int, mode: str = "variant") -> dict:
+        """按已有记录重画：same = 同 seed（几乎复现），variant = 换 seed（同一提示词变体）。
+
+        跳过 LLM 与抽签，直接用记录里的提示词/负面/尺寸 —— 这是调质量最常用的动作：
+        看到一张不错的，想「再来几张」或「同样的构图换种子」。
+        """
+        if self.store is None:
+            return {"ok": False, "error": "记录库不可用"}
+        if self._gen_lock.locked():
+            return {"ok": False, "error": "已有生成在进行"}
+        rec = await self.store.get_record(int(rec_id))
+        if rec is None:
+            return {"ok": False, "error": "记录不存在"}
+        if not str(rec.get("prompt") or "").strip():
+            return {"ok": False, "error": "这条记录没有提示词（可能失败在 LLM 之前）"}
+        same = str(mode or "").strip().lower() in ("same", "same_seed", "同种子")
+        reuse = {
+            "prompt": rec.get("prompt") or "",
+            "negative": rec.get("negative") or "",
+            "caption": rec.get("caption") or "",
+            "width": rec.get("width") or 0,
+            "height": rec.get("height") or 0,
+            "seed": rec.get("seed") if same else None,
+            "workflow": rec.get("workflow") or "",
+        }
+        task = self.spawn(self.generate_one(
+            reason=f"redraw:{'same' if same else 'variant'}", reuse=reuse
+        ))
+        if task is None:
+            return {"ok": False, "error": "后台任务创建失败"}
+        return {"ok": True, "started": True, "same_seed": same}
+
+    async def save_prompt_preset(self, rec_id: int, name: str) -> dict:
+        """把某条记录的提示词存成可复用的收藏（存 meta，不占主表）。"""
+        if self.store is None:
+            return {"ok": False, "error": "记录库不可用"}
+        name = str(name or "").strip()[:40]
+        if not name:
+            return {"ok": False, "error": "收藏名不能为空"}
+        rec = await self.store.get_record(int(rec_id))
+        if rec is None or not str(rec.get("prompt") or "").strip():
+            return {"ok": False, "error": "这条记录没有提示词"}
+        payload = {
+            "prompt": rec.get("prompt") or "",
+            "negative": rec.get("negative") or "",
+            "caption": rec.get("caption") or "",
+            "width": rec.get("width") or 0,
+            "height": rec.get("height") or 0,
+            "workflow": rec.get("workflow") or "",
+        }
+        await self.store.set_meta(
+            f"{PRESET_PREFIX}{name}", json.dumps(payload, ensure_ascii=False)
+        )
+        self.debug_log("preset", f"已收藏提示词「{name}」")
+        return {"ok": True, "name": name}
+
+    async def list_prompt_presets(self) -> list:
+        if self.store is None:
+            return []
+        out: list[dict] = []
+        try:
+            rows = await self.store.list_meta(PRESET_PREFIX)
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 读取提示词收藏失败: {e}")
+            return []
+        for key, val in rows:
+            try:
+                data = json.loads(val or "{}")
+            except Exception:
+                continue
+            if not isinstance(data, dict) or not data.get("prompt"):
+                continue
+            out.append({
+                "name": key[len(PRESET_PREFIX):],
+                "prompt": str(data.get("prompt") or ""),
+                "width": int(data.get("width") or 0),
+                "height": int(data.get("height") or 0),
+                "workflow": str(data.get("workflow") or ""),
+            })
+        out.sort(key=lambda x: x["name"])
+        return out
+
+    async def delete_prompt_preset(self, name: str) -> dict:
+        if self.store is None:
+            return {"ok": False, "error": "记录库不可用"}
+        key = f"{PRESET_PREFIX}{str(name or '').strip()}"
+        if len(key) <= len(PRESET_PREFIX):
+            return {"ok": False, "error": "收藏名不能为空"}
+        await self.store.delete_meta(key)
+        return {"ok": True}
+
+    async def draw_from_preset(self, name: str) -> dict:
+        """用收藏的提示词直接画一张（换 seed）。"""
+        want = str(name or "").strip()
+        for it in await self.list_prompt_presets():
+            if it["name"] != want:
+                continue
+            if self._gen_lock.locked():
+                return {"ok": False, "error": "已有生成在进行"}
+            reuse = {
+                "prompt": it["prompt"], "negative": "", "caption": "",
+                "width": it["width"], "height": it["height"],
+                "seed": None, "workflow": it["workflow"],
+            }
+            # 负向词没进列表接口（避免响应过大），这里从 meta 里补
+            try:
+                raw = await self.store.get_meta(f"{PRESET_PREFIX}{want}")
+                data = json.loads(raw or "{}")
+                if isinstance(data, dict):
+                    reuse["negative"] = str(data.get("negative") or "")
+                    reuse["caption"] = str(data.get("caption") or "")
+            except Exception:
+                pass
+            task = self.spawn(self.generate_one(reason="preset", reuse=reuse))
+            if task is None:
+                return {"ok": False, "error": "后台任务创建失败"}
+            return {"ok": True, "started": True}
+        return {"ok": False, "error": "找不到这个收藏"}
+
+    async def generate_one(
+        self, reason: str = "schedule", theme: str = "",
+        event: "AstrMessageEvent | None" = None, reuse: "dict | None" = None,
+    ) -> dict:
+        """完整跑一轮：抽签 → 连拍/重画 → 选优 → 投递最佳。
+
+        返回 {"ok": bool, "id": int, "error": str, "skipped": bool, "image_path": str,
+        "shots": int, "score": int|None}。任何一张失败都落 failed 记录（图库可查死因），
+        不往会话刷错误；只有选中的那张会投递。
         """
         if self._gen_lock.locked():
             return {"ok": False, "skipped": True, "error": "已有生成在进行", "id": 0}
@@ -1128,42 +1277,209 @@ class MoePaintPlugin(Star):
             self.sched.running_since = datetime.now()
             self.sched.running_note = str(reason or "")[:40]
             try:
-                return await self._generate(reason=reason, theme=theme, event=event)
+                return await self._run_round(reason=reason, theme=theme, event=event, reuse=reuse)
             finally:
                 self.sched.running_since = None
                 self.sched.running_note = ""
 
-    async def _generate(self, reason: str, theme: str, event) -> dict:
-        t0 = time.monotonic()
-        summary: dict = {"ok": False, "id": 0, "error": "", "skipped": False, "image_path": ""}
+    async def _run_round(self, reason: str, theme: str, event, reuse) -> dict:
+        """一轮 = 一次抽签 + 最多 N 张（连拍/低分重画）+ 投递最好那张。"""
+        summary: dict = {
+            "ok": False, "id": 0, "error": "", "skipped": False,
+            "image_path": "", "shots": 0, "score": None,
+        }
         store = self.store
         try:
-            self.reload_templates()
-            if store is None:
-                raise RuntimeError("记录库不可用（看初始化日志）")
-            mode = str(self._cfg().get("workflow_selection") or "random")
-            last_key, legacy = await self._rotation_cursor(store)
+            plan = await self._plan(reason, theme, reuse)
+            brief = plan["brief"]
+            tpl = plan["tpl"]
+            guard = self._guard_enabled()
+            budget = self._shots() if guard else 1
+            if guard:
+                budget += self._score_retries()
+            budget = max(1, min(5, budget))
+
+            results: list[dict] = []
+            carry = reuse
+            for _i in range(budget):
+                r = await self._generate(plan, carry)
+                results.append(r)
+                if not r.get("ok"):
+                    break
+                if carry is not None:
+                    # 连拍/重画沿用同一份提示词，但必须换种子，否则出的是同一张
+                    carry = {**carry, "seed": None}
+                else:
+                    carry = {
+                        k: r.get(k)
+                        for k in ("prompt", "negative", "caption", "width", "height")
+                    }
+                if not guard:
+                    break
+                score = r.get("score")
+                if score is None or int(score) >= self._min_score():
+                    break
+                self.debug_log(
+                    "quality",
+                    f"#{r.get('id')} 质检 {score} 分 < {self._min_score()}，换种子重画",
+                )
+
+            oks = [r for r in results if r.get("ok")]
+            if not oks:
+                last = results[-1] if results else {}
+                summary.update(
+                    id=int(last.get("id") or 0),
+                    error=str(last.get("error") or "生成失败"),
+                )
+                self.debug_log("error", f"本轮失败：{summary['error']}")
+            else:
+                # 有分按分，没分按先后（-id 让最早的排前面）
+                best = max(
+                    oks,
+                    key=lambda r: (
+                        r.get("score") if r.get("score") is not None else -1,
+                        -int(r.get("id") or 0),
+                    ),
+                )
+                summary.update(
+                    ok=True,
+                    id=int(best.get("id") or 0),
+                    image_path=str(best.get("image_path") or ""),
+                    relpath=str(best.get("relpath") or ""),
+                    score=best.get("score"),
+                    shots=len(results),
+                )
+                if plan.get("should_advance"):
+                    try:
+                        await store.set_meta("rr_last", plan.get("new_last") or "")
+                    except Exception as e:
+                        logger.warning(f"{PLUGIN_TAG} 轮换游标写入失败: {e}")
+                if len(oks) > 1:
+                    self.debug_log(
+                        "generate",
+                        f"连拍 {len(results)} 张，投递 #{best.get('id')}"
+                        f"（质检 {best.get('score')}）",
+                    )
+                await self._deliver_best(best, brief, tpl, event)
+            # 收尾：LRU 淘汰（低频，失败也做）
+            try:
+                max_mb = self._float_of(self._sub("gallery"), "max_total_mb", 1024.0)
+                if summary["ok"]:
+                    await gallery_store.prune_gallery(self.gallery_dir, store, max_mb)
+            except Exception as e:
+                logger.warning(f"{PLUGIN_TAG} 图库淘汰失败: {e}")
+        except Exception as e:
+            summary["error"] = errfmt.truncate(errfmt.format_exc(e), 300)
+            logger.exception(f"{PLUGIN_TAG} 生成轮次异常")
+        return summary
+
+    async def _plan(self, reason: str, theme: str, reuse) -> dict:
+        """选模板 + 抽签（或从记录还原）。连拍与重画共用同一份计划。"""
+        self.reload_templates()
+        store = self.store
+        if store is None:
+            raise RuntimeError("记录库不可用（看初始化日志）")
+        mode = str(self._cfg().get("workflow_selection") or "random")
+        last_key, legacy = await self._rotation_cursor(store)
+        tpl = self._template_by_name((reuse or {}).get("workflow") or "") if reuse else None
+        new_last = last_key
+        if tpl is None:
             tpl, new_last = workflow_mgr.pick_template(
                 self._templates, mode, _PICK_RANDOM, last_key, legacy
             )
-            # 只有真的出完一张、且该轮允许推进时才落游标：失败轮与手动试画
-            # （默认）都不占位置，定时计划严格按自己的节奏走。
-            should_advance = self.should_advance_rotation(reason, mode, tpl is not None)
+        if reuse:
+            # 重画不占轮换位：用户只是想再来一张，不是「轮到下一张」
+            return {
+                "tpl": tpl, "brief": self._reuse_brief(reuse), "args": {},
+                "reason": reason, "should_advance": False, "new_last": new_last,
+            }
+        # 只有真的出完一张、且该轮允许推进时才落游标：失败轮与手动试画
+        # （默认）都不占位置，定时计划严格按自己的节奏走。
+        should_advance = self.should_advance_rotation(reason, mode, tpl is not None)
+        # 主题词可能带开关：少女 --no blurry,watermark --ratio 3:2 --seed 42
+        args = prompter.parse_draw_args(theme)
+        if args.get("error"):
+            self.debug_log("generate", f"指令参数有误（该部分已忽略）：{args['error']}")
+        brief = prompter.draw_brief(
+            _PICK_RANDOM,
+            disabled_categories=self._disabled_categories(),
+            extra=self._theme_extra(),
+            weights=self._category_weights(),
+            scope=getattr(tpl, "scope", "both"),
+            scopes=self._category_scopes(),
+        )
+        if args["theme"]:
+            brief["category"] = "自定义"
+            brief["subject"] = args["theme"][:50]
+        if args["style"]:
+            brief["style"] = args["style"]
+        if args["orientation"]:
+            brief["orientation"] = args["orientation"]
+        return {
+            "tpl": tpl, "brief": brief, "args": args, "reason": reason,
+            "should_advance": should_advance, "new_last": new_last,
+        }
 
-            brief = prompter.draw_brief(
-                _PICK_RANDOM,
-                disabled_categories=self._disabled_categories(),
-                extra=self._theme_extra(),
-                weights=self._category_weights(),
-                scope=getattr(tpl, "scope", "both"),
-                scopes=self._category_scopes(),
-            )
-            if theme.strip():
-                brief["category"] = "自定义"
-                brief["subject"] = theme.strip()[:50]
+    async def _deliver_best(self, best: dict, brief: dict, tpl, event) -> None:
+        """只投递选中的那一张；同轮其余记录留在图库，可手动重投。
+
+        投递异常只记 `delivery_error`，绝不动记录状态（v0.7.7 的教训：投递失败会把
+        刚写完的 success 改成 failed，图在库里却显示失败）。
+        """
+        rec_id = int(best.get("id") or 0)
+        abs_path = str(best.get("image_path") or "")
+        if not rec_id or not abs_path:
+            return
+        try:
+            if event is not None:
+                dcfg = self._delivery_cfg()
+                cap = delivery.build_caption(
+                    dcfg.get("caption_template"), str(best.get("caption") or ""),
+                    str(brief.get("category") or ""), str(brief.get("subject") or ""),
+                    tpl.name if tpl else "",
+                    caption_on=config_coerce.truthy(dcfg.get("caption_on", True), True),
+                )
+                comps = ([Plain(cap)] if cap else []) + [Image.fromFileSystem(abs_path)]
+                await event.send(MessageChain(chain=comps))
+                await self.store.merge_delivered(
+                    rec_id,
+                    [{"umo": event.unified_msg_origin, "ok": True,
+                      "ts": int(time.time()), "via": "command"}],
+                )
+            else:
+                rec = await self.store.get_record(rec_id)
+                await delivery.deliver_record(self, rec)
+        except Exception as e:
+            err = errfmt.truncate(errfmt.format_exc(e), 200)
+            logger.warning(f"{PLUGIN_TAG} #{rec_id} 投递失败（图已入库，状态保持成功）: {err}")
+            self.debug_log("delivery", f"#{rec_id} 投递失败：{err}")
+
+    async def _generate(self, plan: dict, reuse: "dict | None" = None) -> dict:
+        """出一张图：建记录 → 取提示词（或复用）→ 注入 → 提交 → 取图 → 体检 → 存档 → 打分。
+
+        模板与创作简报由 `generate_one()` 统一决定（连拍与重画要复用同一份），这里只管
+        「画出来一张」；投递与图库淘汰也在外层。这样一张失败不会拖累整轮，投递失败更
+        不会把已经成功的记录改成失败（v0.7.7 的教训）。
+        """
+        t0 = time.monotonic()
+        summary: dict = {
+            "ok": False, "id": 0, "error": "", "skipped": False,
+            "image_path": "", "relpath": "", "score": None,
+            "prompt": "", "negative": "", "caption": "",
+            "width": 0, "height": 0, "seed": None,
+        }
+        store = self.store
+        try:
+            if store is None:
+                raise RuntimeError("记录库不可用（看初始化日志）")
+            tpl = plan["tpl"]
+            brief = plan["brief"]
+            args = plan.get("args") or {}
+            reason = str(plan.get("reason") or "")
+            extra_negative = str(args.get("negative") or "").strip()
 
             rec_id = await store.insert_running(
-                ts=int(time.time()), day=self._today(), reason=str(reason)[:40],
+                ts=int(time.time()), day=self._today(), reason=reason[:40],
                 category=brief["category"],
                 brief=json.dumps(brief, ensure_ascii=False),
                 workflow=tpl.name if tpl else "",
@@ -1183,49 +1499,101 @@ class MoePaintPlugin(Star):
                         hint = f"（跟随萌绘模式：{why}）"
                     raise RuntimeError("没有可用的工作流模板" + hint)
 
-                payload, prov_label, llm_ms = await self._llm_prompt(brief, tpl)
-                width, height = prompter.pick_size(tpl.sizes, brief["orientation"], brief["composition"], _PICK_RANDOM)
-                negative = payload["negative"] or tpl.default_negative
-                caption = payload["caption"] or f"{brief['category']}·{brief['subject']}"
-                seed = _PICK_RANDOM.getrandbits(48)
+                if reuse:
+                    # 图库「同 seed / 换 seed 重画」：完全跳过 LLM，保证是同一张画的变体
+                    payload = {
+                        "prompt": str(reuse.get("prompt") or ""),
+                        "negative": str(reuse.get("negative") or ""),
+                        "caption": str(reuse.get("caption") or ""),
+                    }
+                    prov_label, llm_ms = "复用", 0.0
+                else:
+                    payload, prov_label, llm_ms = await self._llm_prompt(brief, tpl)
+                width = int(reuse.get("width") or 0) if reuse else 0
+                height = int(reuse.get("height") or 0) if reuse else 0
+                if width < 64 or height < 64:
+                    width, height = prompter.pick_size(
+                        tpl.sizes, str(brief.get("orientation") or "square"),
+                        str(brief.get("composition") or ""), _PICK_RANDOM,
+                        ratio=args.get("ratio"),
+                    )
+                negative = payload.get("negative") or tpl.default_negative
+                if extra_negative:
+                    negative = f"{negative}, {extra_negative}" if negative else extra_negative
+                caption = payload.get("caption") or f"{brief['category']}·{brief['subject']}"
+                seed = None
+                if reuse and reuse.get("seed") is not None:
+                    seed = abs(int(reuse["seed"])) % (2**63)
+                if seed is None:
+                    seed = int(args.get("seed") or 0) or _PICK_RANDOM.getrandbits(48)
+                summary.update(
+                    prompt=payload.get("prompt", ""), negative=negative, caption=caption,
+                    width=width, height=height, seed=seed,
+                )
                 await store.update_generation(
                     rec_id, prompt=payload["prompt"], negative=negative, caption=caption,
                     width=width, height=height, seed=seed,
                     llm_provider=prov_label, llm_latency_ms=round(llm_ms, 1),
                 )
 
-                wf = workflow_mgr.inject(tpl.wf, tpl.info, payload["prompt"], negative, width, height, seed)
-                client = self._get_client()
-                if client is None:
-                    raise RuntimeError("ComfyUI 客户端不可用")
-                queued = await client.queue_prompt(wf)
-                prompt_id = str(queued.get("prompt_id") or "")
-                if not prompt_id:
-                    raise RuntimeError(f"提交失败：{json.dumps(queued, ensure_ascii=False)[:200]}")
-                ahead = queued.get("_queue_position")
-                if ahead is None:
-                    try:
-                        ahead = comfy_client.queue_pending(await client.get_queue())
-                    except Exception:
-                        ahead = 0
-                timeout = self._wait_budget(ahead)
-                history = await client.wait_for_result(
-                    prompt_id, timeout,
-                    interval=self._int_of(self._sub("comfyui"), "poll_interval", 2, lo=1, hi=30),
-                )
-                if history is None:
-                    raise RuntimeError(f"等待超时（预算 {timeout}s，队列前方约 {ahead} 个任务）")
-                err = comfy_client.task_error(history)
-                if err:
-                    raise RuntimeError(f"ComfyUI 执行失败：{err}")
-                imgs = comfy_client.extract_images(history)
-                if not imgs:
-                    raise RuntimeError("任务完成但没有输出图片")
-                entry = imgs[0]
-                data = await client.get_image(
-                    entry["filename"], entry.get("subfolder", ""), entry.get("type", "output")
+                data = b""
+                entry: dict = {}
+                prompt_id = ""
+                for try_i in range(2):
+                    wf = workflow_mgr.inject(
+                        tpl.wf, tpl.info, payload["prompt"], negative, width, height, seed,
+                        overrides=getattr(tpl, "params", None),
+                    )
+                    client = self._get_client()
+                    if client is None:
+                        raise RuntimeError("ComfyUI 客户端不可用")
+                    queued = await client.queue_prompt(wf)
+                    prompt_id = str(queued.get("prompt_id") or "")
+                    if not prompt_id:
+                        raise RuntimeError(f"提交失败：{json.dumps(queued, ensure_ascii=False)[:200]}")
+                    ahead = queued.get("_queue_position")
+                    if ahead is None:
+                        try:
+                            ahead = comfy_client.queue_pending(await client.get_queue())
+                        except Exception:
+                            ahead = 0
+                    timeout = self._wait_budget(ahead)
+                    history = await client.wait_for_result(
+                        prompt_id, timeout,
+                        interval=self._int_of(self._sub("comfyui"), "poll_interval", 2, lo=1, hi=30),
+                    )
+                    if history is None:
+                        raise RuntimeError(f"等待超时（预算 {timeout}s，队列前方约 {ahead} 个任务）")
+                    err = comfy_client.task_error(history)
+                    if err:
+                        raise RuntimeError(f"ComfyUI 执行失败：{err}")
+                    imgs = comfy_client.extract_images(history)
+                    if not imgs:
+                        raise RuntimeError("任务完成但没有输出图片")
+                    entry = imgs[0]
+                    data = await client.get_image(
+                        entry["filename"], entry.get("subfolder", ""), entry.get("type", "output")
+                    )
+                    # 空图/全黑体检：ComfyUI 出错时常常给一张全黑 PNG，以前会当成功存档
+                    blank = gallery_store.suspect_blank(data, entry.get("filename", ""))
+                    if not blank:
+                        break
+                    if try_i == 0:
+                        logger.warning(f"{PLUGIN_TAG} #{rec_id} 输出疑似无效（{blank}），换种子重试")
+                        seed = _PICK_RANDOM.getrandbits(48)
+                        summary["seed"] = seed
+                        await store.update_generation(rec_id, seed=seed)
+                        continue
+                    raise RuntimeError(f"输出疑似无效：{blank}（已重试一次）")
+
+                # 精修 pass（可选，默认关）：失败就用原图，绝不阻断出图
+                data, refine_note = await self._maybe_refine(
+                    data, entry.get("filename", ""), payload["prompt"], negative, seed
                 )
                 ext = gallery_store.ext_for(entry["filename"])
+                if refine_note:
+                    # 精修图固定是 SaveImage 产出的 PNG，别沿用原图的扩展名
+                    ext = ".png"
                 abs_path, rel, sha16, _dedup = gallery_store.archive_image(self.gallery_dir, data, ext)
                 gen_ms = (time.monotonic() - t0) * 1000
                 await store.update_generation(
@@ -1233,17 +1601,27 @@ class MoePaintPlugin(Star):
                     image_relpath=rel, sha256=sha16, gen_latency_ms=round(gen_ms, 1), error="",
                 )
                 summary.update(ok=True, id=rec_id, image_path=abs_path, relpath=rel)
-                if should_advance:
-                    await store.set_meta("rr_last", new_last)
                 logger.info(
                     f"{PLUGIN_TAG} 生成成功 #{rec_id}：{brief['category']}·{brief['subject']} "
-                    f"（{tpl.name} {width}x{height} seed={seed}，{gen_ms / 1000:.1f}s）"
+                    f"（{tpl.name} {width}x{height} seed={seed}，{gen_ms / 1000:.1f}s"
+                    f"{'，' + refine_note if refine_note else ''}）"
                 )
                 self.debug_log(
                     "generate",
                     f"#{rec_id} 成功（{tpl.name} {width}x{height}，总 {gen_ms / 1000:.1f}s，"
                     f"LLM {llm_ms / 1000:.1f}s）",
                 )
+                # 成图自检（可选）：这里只打分落库，「要不要重画」由 generate_one 决定
+                if self._guard_enabled():
+                    score, why = await self._score_image(
+                        abs_path, brief, payload.get("prompt", "")
+                    )
+                    if score is not None:
+                        summary["score"] = score
+                        await store.update_generation(rec_id, score=score, score_reason=why)
+                        self.debug_log("quality", f"#{rec_id} 质检 {score} 分 {why}".strip())
+                    elif why:
+                        self.debug_log("quality", f"#{rec_id} 质检跳过：{why}")
             except asyncio.CancelledError:
                 # 被硬超时/插件卸载取消：必须落一行收尾，否则这条记录永远是「生成中」
                 msg = "生成被取消（超时或插件重载），本轮没有结果"
@@ -1270,46 +1648,186 @@ class MoePaintPlugin(Star):
                 logger.error(f"{PLUGIN_TAG} 生成失败 #{rec_id}: {summary['error']}")
                 self.debug_log("error", f"#{rec_id} 失败：{summary['error']}")
 
-            # 投递独立于上面的生成 try（v0.7.7）。以前投递异常会落进同一个 except，
-            # 把刚写完的 success 又改成 failed —— 图在库里、记录显示失败、图库还
-            # 因为状态不是 success 而不加载缩略图，看上去像「画出来了但坏了」。
-            # 指令触发 → 当前会话直发；其余 → 白名单会话。
-            if summary.get("ok"):
-                try:
-                    if event is not None:
-                        dcfg = self._delivery_cfg()
-                        cap = delivery.build_caption(
-                            dcfg.get("caption_template"), caption, brief["category"],
-                            brief["subject"], tpl.name,
-                            caption_on=config_coerce.truthy(dcfg.get("caption_on", True), True),
-                        )
-                        comps = ([Plain(cap)] if cap else []) + [Image.fromFileSystem(abs_path)]
-                        await event.send(MessageChain(chain=comps))
-                        await store.merge_delivered(
-                            rec_id,
-                            [{"umo": event.unified_msg_origin, "ok": True,
-                              "ts": int(time.time()), "via": "command"}],
-                        )
-                    else:
-                        rec = await store.get_record(rec_id)
-                        await delivery.deliver_record(self, rec)
-                except Exception as e:
-                    err = errfmt.truncate(errfmt.format_exc(e), 200)
-                    summary["delivery_error"] = err
-                    logger.warning(f"{PLUGIN_TAG} #{rec_id} 投递失败（图已入库，状态保持成功）: {err}")
-                    self.debug_log("delivery", f"#{rec_id} 投递失败：{err}")
-            # 收尾：LRU 淘汰（低频，失败也做）
-            try:
-                max_mb = self._float_of(self._sub("gallery"), "max_total_mb", 1024.0)
-                if summary["ok"]:
-                    await gallery_store.prune_gallery(self.gallery_dir, store, max_mb)
-            except Exception as e:
-                logger.warning(f"{PLUGIN_TAG} 图库淘汰失败: {e}")
         except Exception as e:
             # 走到这里说明连记录行都没建成功——只能日志留痕
             summary["error"] = errfmt.truncate(errfmt.format_exc(e), 300)
             logger.exception(f"{PLUGIN_TAG} 生成管线异常")
         return summary
+
+    # ------------------------------------------------------------------ #
+    # 画质闸门 / 连拍 / 精修（v0.7.8）
+    # ------------------------------------------------------------------ #
+
+    def _guard_cfg(self) -> dict:
+        return self._sub("quality_guard")
+
+    def _guard_enabled(self) -> bool:
+        """成图自检开关。关掉时连拍强制为 1（不评分就没必要多拍）。"""
+        return config_coerce.truthy(self._guard_cfg().get("enabled", False), False)
+
+    def _shots(self) -> int:
+        if not self._guard_enabled():
+            return 1
+        return self._int_of(self._guard_cfg(), "shots", 1, lo=1, hi=4)
+
+    def _min_score(self) -> int:
+        return self._int_of(self._guard_cfg(), "min_score", 60, lo=0, hi=100)
+
+    def _score_retries(self) -> int:
+        return self._int_of(self._guard_cfg(), "retry", 1, lo=0, hi=3)
+
+    def _template_by_name(self, name: str):
+        """按名字找当前可用模板（重画时优先回到原工作流，找不到再随便挑一个）。"""
+        want = str(name or "").strip()
+        if not want:
+            return None
+        for t in workflow_mgr.enabled_pool(self._templates):
+            if str(t.name or "") == want:
+                return t
+        return None
+
+    @staticmethod
+    def _reuse_brief(rec: dict) -> dict:
+        """从记录里还原创作简报；老记录缺字段时给一份最小可用结构。"""
+        try:
+            brief = json.loads(rec.get("brief") or "{}")
+            if isinstance(brief, dict) and brief:
+                # 老记录可能缺键：补齐下游会直接取值的那几个，别让重画 KeyError
+                brief.setdefault("category", str(rec.get("category") or ""))
+                brief.setdefault("subject", "")
+                brief.setdefault("style", "")
+                brief.setdefault("composition", "")
+                brief.setdefault("orientation", "square")
+                return brief
+        except Exception:
+            pass
+        return {
+            "category": str(rec.get("category") or ""), "subject": "", "style": "",
+            "composition": "", "orientation": "square", "light": "", "mood": "",
+            "scope": "both",
+        }
+
+    async def _score_image(self, abs_path: str, brief: dict, prompt: str) -> "tuple[int | None, str]":
+        """用多模态模型给成品打分（0~100），返回 (分数, 理由/说明)。
+
+        为什么值得多一次调用：定时出图没人盯着，崩手/糊图直接投进群里最伤口碑。
+        评分只做粗筛（低于阈值换种子重画一次），不追求精确；模型不支持图片输入时
+        会返回 (None, 原因)，调用方按「跳过质检」处理，不影响出图。
+        """
+        if not abs_path:
+            return None, "没有图片路径"
+        cfg = self._guard_cfg()
+        provider = None
+        pid = str(cfg.get("provider_id") or "").strip()
+        try:
+            if pid:
+                p = self.context.get_provider_by_id(pid)
+                if p is not None and hasattr(p, "text_chat"):
+                    provider = p
+            if provider is None:
+                provider = await self._provider()
+        except Exception as e:
+            return None, f"取视觉模型失败：{errfmt.truncate(errfmt.format_exc(e), 120)}"
+        if provider is None:
+            return None, "没有可用的对话模型"
+        sys_prompt = (
+            "你是图像质检员。只输出一个 JSON 对象，禁止解释与代码围栏："
+            '{"score": 0 到 100 的整数, "issues": ["中文短句，最多 3 条"]}。\n'
+            "评分看四件事：① 结构是否崩坏（肢体、手指、五官、多手多脚、身体断裂）；"
+            "② 是否清晰（糊成一团、大面积噪点、黑块）；③ 是否与描述相符（题材与主体）；"
+            "④ 完成度（构图切割、水印文字、明显接缝）。"
+            "90 以上=可直接发布；70~89=小瑕疵；60~69=明显缺陷但可辨认；60 以下=崩坏或与描述不符。"
+        )
+        user_prompt = (
+            f"创作简报：{prompter.brief_text(brief)}\n"
+            f"提示词：{str(prompt or '')[:900]}\n"
+            "请按契约输出 JSON。"
+        )
+        timeout = self._int_of(cfg, "timeout", 45, lo=10, hi=180)
+        try:
+            resp = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=user_prompt, system_prompt=sys_prompt, image_urls=[abs_path],
+                ),
+                timeout=timeout,
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+        except Exception as e:
+            return None, f"质检调用失败：{errfmt.truncate(errfmt.format_exc(e), 160)}"
+        data = prompter.parse_score_payload(text)
+        if data is None:
+            return None, f"质检输出不合契约：{text[:120]}"
+        return int(data["score"]), str(data.get("issues") or "")
+
+    def _refine_cfg(self) -> dict:
+        return self._sub("refine")
+
+    def _refine_enabled(self) -> bool:
+        cfg = self._refine_cfg()
+        return config_coerce.truthy(cfg.get("enabled", False), False) and bool(
+            str(cfg.get("ckpt_name") or "").strip()
+        )
+
+    async def _maybe_refine(
+        self, data: bytes, filename: str, positive: str, negative: str, seed: int
+    ) -> "tuple[bytes, str]":
+        """放大 + 低 denoise 重绘（可选）。失败一律退回原图，绝不阻断出图。"""
+        if not self._refine_enabled() or not data:
+            return data, ""
+        try:
+            out = await self._run_refine(data, filename, positive, negative, seed)
+        except Exception as e:
+            err = errfmt.truncate(errfmt.format_exc(e), 200)
+            logger.warning(f"{PLUGIN_TAG} 精修失败（用原图）: {err}")
+            self.debug_log("refine", f"精修失败（用原图）：{err}")
+            return data, ""
+        if not out:
+            return data, ""
+        self.debug_log("refine", f"精修完成（{len(out) // 1024}KB）")
+        return out, "已精修"
+
+    async def _run_refine(
+        self, data: bytes, filename: str, positive: str, negative: str, seed: int
+    ) -> bytes:
+        """上传成品图到 ComfyUI，按内置精修图跑一遍，返回新图字节。"""
+        cfg = self._refine_cfg()
+        client = self._get_client()
+        if client is None:
+            raise RuntimeError("ComfyUI 客户端不可用")
+        name = str(filename or "moe_paint.png").strip() or "moe_paint.png"
+        uploaded = await client.upload_image(data, name)
+        image_name = str(uploaded.get("name") or name)
+        wf = workflow_mgr.build_refine_workflow(
+            image_name=image_name,
+            ckpt_name=str(cfg.get("ckpt_name") or "").strip(),
+            positive=positive,
+            negative=negative,
+            scale=float(cfg.get("scale") or 1.5),
+            denoise=float(cfg.get("denoise") or 0.35),
+            steps=self._int_of(cfg, "steps", 20, lo=4, hi=60),
+            cfg_scale=float(cfg.get("cfg") or 5.0),
+            seed=int(seed or 0),
+            sampler=str(cfg.get("sampler_name") or "euler").strip() or "euler",
+            scheduler=str(cfg.get("scheduler") or "normal").strip() or "normal",
+        )
+        queued = await client.queue_prompt(wf)
+        prompt_id = str(queued.get("prompt_id") or "")
+        if not prompt_id:
+            raise RuntimeError(f"精修提交失败：{json.dumps(queued, ensure_ascii=False)[:160]}")
+        timeout = self._int_of(cfg, "timeout", 300, lo=30, hi=1800)
+        history = await client.wait_for_result(prompt_id, timeout, interval=2)
+        if history is None:
+            raise RuntimeError(f"精修等待超时（{timeout}s）")
+        err = comfy_client.task_error(history)
+        if err:
+            raise RuntimeError(f"精修执行失败：{err}")
+        imgs = comfy_client.extract_images(history)
+        if not imgs:
+            raise RuntimeError("精修没有输出图片")
+        entry = imgs[0]
+        return await client.get_image(
+            entry["filename"], entry.get("subfolder", ""), entry.get("type", "output")
+        )
 
     def _wait_budget(self, ahead: int) -> int:
         """等待预算：draw_timeout + 队列前方数 × queue_extra_timeout，封顶 hard_cap。"""

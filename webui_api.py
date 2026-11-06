@@ -393,6 +393,68 @@ async def h_stats(plugin) -> dict:
     return ok(await plugin.store.stats())
 
 
+# --------------------------------------------------------------------------- #
+# 重画 / 提示词收藏（v0.7.8）
+# --------------------------------------------------------------------------- #
+
+async def h_redraw(plugin) -> dict:
+    """POST {id, mode: same|variant}：按已有记录重画（同 seed / 换 seed）。"""
+    body = await _payload()
+    try:
+        rec_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return err("id 不合法")
+    res = await plugin.redraw_record(rec_id, str(body.get("mode") or "variant"))
+    return ok(res) if res.get("ok") else err(res.get("error") or "触发失败")
+
+
+async def h_prompt_presets(plugin) -> dict:
+    """GET：提示词收藏列表（不含负向词，避免响应过大）。"""
+    return ok({"items": await plugin.list_prompt_presets()})
+
+
+async def h_prompt_preset(plugin) -> dict:
+    """POST {action: save|delete|draw, id?, name?}。"""
+    body = await _payload()
+    action = str(body.get("action") or "").strip().lower()
+    name = str(body.get("name") or "").strip()
+    if action == "save":
+        try:
+            rec_id = int(body.get("id"))
+        except (TypeError, ValueError):
+            return err("id 不合法")
+        res = await plugin.save_prompt_preset(rec_id, name)
+    elif action == "delete":
+        res = await plugin.delete_prompt_preset(name)
+    elif action == "draw":
+        res = await plugin.draw_from_preset(name)
+    else:
+        return err("action 必须是 save / delete / draw")
+    return ok(res) if res.get("ok") else err(res.get("error") or "操作失败")
+
+
+async def h_debug_score(plugin) -> dict:
+    """POST {id}：对已有记录跑一次成图自检（不改状态，只返回分数，用于校准阈值）。"""
+    if plugin.store is None:
+        return err("数据库未就绪")
+    body = await _payload()
+    try:
+        rec_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return err("id 不合法")
+    rec = await plugin.store.get_record(rec_id)
+    if rec is None:
+        return err("记录不存在")
+    path = plugin.gallery_abs(rec.get("image_relpath") or "")
+    if not path:
+        return err("这条记录没有图片（可能已被容量清理）")
+    brief = plugin._reuse_brief(rec)
+    score, why = await plugin._score_image(path, brief, rec.get("prompt") or "")
+    if score is None:
+        return err(why or "质检不可用")
+    return ok({"score": score, "issues": why})
+
+
 async def h_workflows(plugin) -> dict:
     try:
         plugin.reload_templates()
@@ -752,6 +814,10 @@ def register(plugin) -> None:
         ("/record/delete", h_delete, ["POST"]),
         ("/record/star", h_star, ["POST"]),
         ("/record/resend", h_resend, ["POST"]),
+        ("/record/redraw", h_redraw, ["POST"]),
+        ("/prompt/presets", h_prompt_presets, ["GET"]),
+        ("/prompt/preset", h_prompt_preset, ["POST"]),
+        ("/debug/score", h_debug_score, ["POST"]),
         ("/stats", h_stats, ["GET"]),
         ("/workflows", h_workflows, ["GET"]),
         ("/workflows/parse", h_workflow_parse, ["POST"]),

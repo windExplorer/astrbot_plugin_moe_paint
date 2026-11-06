@@ -247,6 +247,188 @@ onMounted(loadConfig);
       </div>
     </div>
 
+    <!-- 成图自检（画质闸门） -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">成图自检（画质闸门）</div>
+        <n-button
+          size="small"
+          type="primary"
+          :loading="!!saving['成图自检']"
+          @click="save([
+            'quality_guard.enabled', 'quality_guard.provider_id', 'quality_guard.min_score',
+            'quality_guard.retry', 'quality_guard.shots', 'quality_guard.timeout',
+          ], '成图自检')"
+        >
+          保存
+        </n-button>
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">启用</span>
+          <n-switch
+            :value="cfgBool('quality_guard.enabled', false)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('quality_guard.enabled', v)"
+          />
+          <span class="mp-sub">每张多一次多模态调用（几秒 + 模型费用）；关掉则连拍强制为 1</span>
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">质检模型（需支持图片输入）</span>
+          <n-select
+            :value="String(cfgGet('quality_guard.provider_id', ''))"
+            :options="providerOptions"
+            size="small"
+            filterable
+            tag
+            :consistent-menu-width="false"
+            @update:value="(v: string) => cfgSet('quality_guard.provider_id', v)"
+          />
+          <span class="mp-sub">留空 = 跟「提示词模型」同一个；模型不支持图片时会自动跳过质检</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">合格分数线</span>
+          <n-input-number
+            :value="cfgNum('quality_guard.min_score', 60)"
+            :min="0" :max="100" size="small"
+            @update:value="(v: number | null) => cfgSet('quality_guard.min_score', v ?? 60)"
+          />
+          <span class="mp-sub">低于它才重画；调太高会频繁重画</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">低分重画次数</span>
+          <n-input-number
+            :value="cfgNum('quality_guard.retry', 1)"
+            :min="0" :max="3" size="small"
+            @update:value="(v: number | null) => cfgSet('quality_guard.retry', v ?? 0)"
+          />
+          <span class="mp-sub">同提示词换种子重画</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">连拍张数</span>
+          <n-input-number
+            :value="cfgNum('quality_guard.shots', 1)"
+            :min="1" :max="4" size="small"
+            @update:value="(v: number | null) => cfgSet('quality_guard.shots', v ?? 1)"
+          />
+          <span class="mp-sub">只投递分数最高的那张，其余留在图库</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">质检超时（秒）</span>
+          <n-input-number
+            :value="cfgNum('quality_guard.timeout', 45)"
+            :min="10" :max="180" size="small"
+            @update:value="(v: number | null) => cfgSet('quality_guard.timeout', v ?? 45)"
+          />
+          <span class="mp-sub">超时按跳过质检处理，不影响出图</span>
+        </label>
+      </div>
+      <div class="mp-hint" style="margin-top: 10px">
+        阈值拿不准时，去图库点开任意一张，用「试评分」看它实际能得多少分，再回来调。
+      </div>
+    </div>
+
+    <!-- 精修 pass -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">精修 pass（放大 + 重绘）</div>
+        <n-button
+          size="small"
+          type="primary"
+          :loading="!!saving['精修']"
+          @click="save([
+            'refine.enabled', 'refine.ckpt_name', 'refine.scale', 'refine.denoise',
+            'refine.steps', 'refine.cfg', 'refine.sampler_name', 'refine.scheduler',
+            'refine.timeout',
+          ], '精修')"
+        >
+          保存
+        </n-button>
+      </div>
+      <div class="notice">
+        走插件内置的一份标准工作流（独立加载器 + KSampler），不碰你自己的模板；
+        精修失败会自动用原图。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">启用</span>
+          <n-switch
+            :value="cfgBool('refine.enabled', false)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('refine.enabled', v)"
+          />
+          <span class="mp-sub">每张多一次提交（要重新加载模型）</span>
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">检查点文件名</span>
+          <n-input
+            :value="String(cfgGet('refine.ckpt_name', ''))"
+            size="small"
+            placeholder="如 anima_official_v1.safetensors（留空 = 不精修）"
+            @update:value="(v: string) => cfgSet('refine.ckpt_name', v)"
+          />
+          <span class="mp-sub">ComfyUI 的 checkpoints 目录里的文件名，得和出图用的底模一致</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">放大倍数</span>
+          <n-input-number
+            :value="cfgNum('refine.scale', 1.5)"
+            :min="1" :max="2" :step="0.1" size="small"
+            @update:value="(v: number | null) => cfgSet('refine.scale', v ?? 1.5)"
+          />
+          <span class="mp-sub">1.5 性价比最高；2.0 显存吃紧</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">重绘强度 denoise</span>
+          <n-input-number
+            :value="cfgNum('refine.denoise', 0.35)"
+            :min="0.05" :max="0.9" :step="0.05" size="small"
+            @update:value="(v: number | null) => cfgSet('refine.denoise', v ?? 0.35)"
+          />
+          <span class="mp-sub">0.3~0.45 修细节；太高会改构图</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">步数 / CFG</span>
+          <div class="inline">
+            <n-input-number
+              :value="cfgNum('refine.steps', 20)"
+              :min="4" :max="60" size="small" style="width: 92px"
+              @update:value="(v: number | null) => cfgSet('refine.steps', v ?? 20)"
+            />
+            <n-input-number
+              :value="cfgNum('refine.cfg', 5)"
+              :min="1" :max="15" :step="0.5" size="small" style="width: 92px"
+              @update:value="(v: number | null) => cfgSet('refine.cfg', v ?? 5)"
+            />
+          </div>
+        </label>
+        <label class="mp-field">
+          <span class="label">采样器 / 调度器</span>
+          <div class="inline">
+            <n-input
+              :value="String(cfgGet('refine.sampler_name', 'euler'))"
+              size="small" style="width: 130px"
+              @update:value="(v: string) => cfgSet('refine.sampler_name', v)"
+            />
+            <n-input
+              :value="String(cfgGet('refine.scheduler', 'normal'))"
+              size="small" style="width: 120px"
+              @update:value="(v: string) => cfgSet('refine.scheduler', v)"
+            />
+          </div>
+        </label>
+        <label class="mp-field">
+          <span class="label">等待上限（秒）</span>
+          <n-input-number
+            :value="cfgNum('refine.timeout', 300)"
+            :min="30" :max="1800" size="small"
+            @update:value="(v: number | null) => cfgSet('refine.timeout', v ?? 300)"
+          />
+          <span class="mp-sub">含重新加载模型与排队</span>
+        </label>
+      </div>
+    </div>
+
     <!-- 图库与通知 -->
     <div class="mp-card">
       <div class="mp-card-head">
@@ -347,6 +529,12 @@ onMounted(loadConfig);
   border-radius: 10px;
   background: rgba(63, 157, 118, 0.1);
   font-size: 12px;
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .probe.bad {

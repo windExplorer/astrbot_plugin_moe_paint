@@ -116,6 +116,35 @@ class ComfyUIClient:
             return await self._get(f"/history/{prompt_id}", timeout=timeout)
         return await self._get("/history", timeout=timeout)
 
+    async def upload_image(
+        self, data: bytes, filename: str, subfolder: str = "", overwrite: bool = True
+    ) -> dict:
+        """把图片上传到 ComfyUI 的 input 目录，返回 {"name", "subfolder", "type"}。
+
+        用途：精修 pass 要把刚出的图喂回 ComfyUI（LoadImage 只能读 input 里的文件）。
+        """
+        session = await self._session_get()
+        form = aiohttp.FormData()
+        form.add_field(
+            "image", data, filename=filename or "moe_paint.png", content_type="image/png"
+        )
+        form.add_field("overwrite", "true" if overwrite else "false")
+        if subfolder:
+            form.add_field("subfolder", subfolder)
+        async with session.post(self.base_url + "/upload/image", data=form) as resp:
+            if resp.status >= 400:
+                try:
+                    body = await resp.text()
+                except Exception:
+                    body = ""
+                raise RuntimeError(
+                    f"上传图片失败（HTTP {resp.status}）：{summarize_error_body(body)}"
+                )
+            payload = await resp.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("上传图片返回结构异常")
+        return payload
+
     async def get_image(self, filename: str, subfolder: str, img_type: str) -> bytes:
         url = (
             f"{self.base_url}/view"

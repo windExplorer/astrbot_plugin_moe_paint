@@ -191,6 +191,13 @@ onMounted(refreshAll);
           <span v-else>全部健康</span>
         </div>
       </div>
+      <div class="stat">
+        <div class="stat-label">平均质检</div>
+        <div class="stat-value">{{ stats?.score_avg != null ? stats.score_avg : "-" }}</div>
+        <div class="stat-foot">
+          已评分 {{ stats?.score_count ?? 0 }} 张 · 低分 {{ stats?.score_low ?? 0 }}
+        </div>
+      </div>
     </section>
 
     <!-- 环境 -->

@@ -177,6 +177,95 @@ def workflow_scope_for(chosen: dict, overrides: dict, fallback: str = "auto") ->
     return v if v in ("auto", "anime", "photo", "both") else "auto"
 
 
+# --------------------------------------------------------------------------- #
+# 采样参数档（v0.7.8）
+#
+# 为什么值得做：本地模板此前完全沿用 JSON 里的 steps/cfg/采样器 —— 有人导出的是
+# 4 步 turbo 图，有人是 50 步测试图，出图质量全靠运气。给三档预设，把「质量/耗时」
+# 变成一个可选的显式决定；只在工作流真有该字段时才写入，绝不硬塞自定义节点。
+# --------------------------------------------------------------------------- #
+
+PARAM_PRESETS: dict = {
+    "fast": {"steps": 20, "cfg": 5.0},
+    "standard": {"steps": 28, "cfg": 6.0},
+    "high": {"steps": 36, "cfg": 6.5},
+}
+PARAM_PRESET_LABELS = {
+    "keep": "沿用工作流原参数",
+    "fast": "快出（20 步 / CFG 5）",
+    "standard": "标准（28 步 / CFG 6）",
+    "high": "精修（36 步 / CFG 6.5）",
+}
+
+
+def params_for_entry(entry: dict) -> dict:
+    """模板条目 → 采样参数覆盖（preset 给底，显式字段再压）。
+
+    只产出 inject() 认的四个键：steps / cfg / sampler_name / scheduler。
+    """
+    out: dict = {}
+    preset = str((entry or {}).get("params_preset") or "").strip().lower()
+    if preset in PARAM_PRESETS:
+        out.update(PARAM_PRESETS[preset])
+    for key in ("steps", "cfg", "sampler_name", "scheduler"):
+        v = (entry or {}).get(key)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            out[key] = int(v) if key == "steps" else float(v)
+        elif isinstance(v, str) and v.strip() and key in ("sampler_name", "scheduler"):
+            out[key] = v.strip()
+    return out
+
+
+def build_refine_workflow(
+    image_name: str,
+    ckpt_name: str,
+    positive: str,
+    negative: str,
+    scale: float = 1.5,
+    denoise: float = 0.35,
+    steps: int = 20,
+    cfg_scale: float = 5.0,
+    seed: int = 0,
+    sampler: str = "euler",
+    scheduler: str = "normal",
+) -> dict:
+    """内置精修图：LoadImage → 放大 → VAEEncode → KSampler(低 denoise) → VAEDecode → Save。
+
+    为什么用「独立小图」而不是在用户模板上做图手术：模板千奇百怪（自定义节点、异形
+    采样链、多采样器），往里注入放大链必然有踩不完的坑。这份图只有一个检查点加载器 +
+    标准 KSampler，任何底模都能跑；代价是要重新加载一次模型（多几秒）。
+    """
+    s = max(1.0, min(2.0, float(scale or 1.5)))
+    dn = max(0.05, min(0.9, float(denoise or 0.35)))
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt_name}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "3": {
+            "class_type": "ImageScaleBy",
+            "inputs": {"image": ["2", 0], "upscale_method": "lanczos", "scale_by": s},
+        },
+        "4": {"class_type": "VAEEncode", "inputs": {"pixels": ["3", 0], "vae": ["1", 2]}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["1", 1]}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["1", 1]}},
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0], "positive": ["5", 0], "negative": ["6", 0],
+                "latent_image": ["4", 0], "seed": int(seed or 0) % (2**64),
+                "steps": int(steps), "cfg": float(cfg_scale),
+                "sampler_name": sampler, "scheduler": scheduler, "denoise": dn,
+            },
+        },
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["1", 2]}},
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["8", 0], "filename_prefix": "moe_paint_refine"},
+        },
+    }
+
+
 def _ref_target(ref) -> str:
     """ComfyUI 节点引用（如 ["3", 0]）→ 目标节点 id 字符串；非引用返回 ""。"""
     if isinstance(ref, (list, tuple)) and ref:
@@ -212,6 +301,7 @@ class Template:
     subject_scope: str = "auto"  # 配置值 auto / anime / photo / both
     scope: str = "both"  # 生效能力，抽签时用它筛类别
     key: str = ""  # 轮换游标的稳定标识（local:文件名 / anima:工作流 id）
+    params: dict = field(default_factory=dict)  # 采样参数覆盖（steps/cfg/sampler/scheduler）
 
     def to_public(self) -> dict:
         """给 WebUI / 指令展示的公开形状（不含工作流 JSON 本体）。"""
@@ -227,6 +317,7 @@ class Template:
             "quality_prefix": self.quality_prefix,
             "subject_scope": self.subject_scope,
             "scope": self.scope,
+            "params": dict(self.params or {}),
             "default_negative": self.default_negative,
             "enabled": self.enabled,
             "ok": self.ok,
@@ -256,6 +347,7 @@ def locate_nodes(wf: dict, override: dict | None = None) -> dict:
         "positive": "",
         "negative": "",
         "latent": "",
+        "sampler": "",
         "seed_nodes": [],
         "positive_field": "text",
         "negative_field": "text",
@@ -281,6 +373,7 @@ def locate_nodes(wf: dict, override: dict | None = None) -> dict:
     if samplers:
         _, _sid, snode = samplers[0]
         s_in = snode.get("inputs") or {}
+        info["sampler"] = str(_sid)
         info["positive"] = _ref_target(s_in.get("positive"))
         info["negative"] = _ref_target(s_in.get("negative"))
         info["latent"] = _ref_target(s_in.get("latent_image"))
@@ -602,6 +695,14 @@ def load_templates(
             str(profile.get("quality_prefix") or "masterpiece, best quality, very aesthetic, absurdres")
             if tag_style == "danbooru" else ""
         )
+        params = params_for_entry(entry)
+        if params:
+            s_in = ((wf.get(str(info.get("sampler") or "")) or {}).get("inputs") or {})
+            missing = [k for k in params if k not in s_in]
+            if missing:
+                info.setdefault("warnings", []).append(
+                    f"采样参数 {'、'.join(missing)} 在该工作流的采样器节点上不存在，已忽略"
+                )
         tpl = Template(
             name=name,
             file=fname,
@@ -620,6 +721,7 @@ def load_templates(
             subject_scope=scope_cfg,
             scope=scope,
             key=f"local:{fname}",
+            params=params,
         )
         out.append(tpl)
     return out
@@ -720,8 +822,14 @@ def inject(
     width: int,
     height: int,
     seed: int,
+    overrides: "dict | None" = None,
 ) -> dict:
-    """在深拷贝上注入：正/负向文本、latent 宽高、全部 seed 节点。"""
+    """在深拷贝上注入：正/负向文本、latent 宽高、全部 seed 节点、可选采样参数。
+
+    overrides 只写**工作流里本来就有的字段**（steps/cfg/sampler_name/scheduler）：
+    异形采样链常常缺 scheduler 或把采样器名放在别的节点上，硬塞会让 ComfyUI 直接
+    校验失败，比不改更糟。
+    """
     wf = copy.deepcopy(wf)
     pos_id, neg_id = info["positive"], info["negative"]
     if pos_id in wf:
@@ -736,6 +844,16 @@ def inject(
     for nid, key in info.get("seed_nodes") or []:
         if nid in wf:
             wf[nid]["inputs"][key] = int(seed) % (2**64)
+    over = overrides or {}
+    sid = str(info.get("sampler") or "")
+    if sid and sid in wf and over:
+        s_in = wf[sid].setdefault("inputs", {})
+        for key in ("steps", "cfg", "sampler_name", "scheduler"):
+            v = over.get(key)
+            if v is None or v == "":
+                continue
+            if key in s_in:
+                s_in[key] = v
     return wf
 
 

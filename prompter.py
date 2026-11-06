@@ -236,6 +236,153 @@ DEFAULT_CHARACTER_NAMES = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# v0.7.8：负面基线 / 标签预算 / danbooru 规范化
+#
+# 为什么要有负面基线：此前 negative 只有「LLM 自己写的 + 人物排除词 + 画风反向词」，
+# 一旦模型偷懒给空串（契约允许），出图就完全没有质量兜底。这里给一套与风格匹配的
+# 通用缺陷词，永远垫在最前（用户可在配置里改或清空）。
+# --------------------------------------------------------------------------- #
+
+NEGATIVE_BASE_EN = (
+    "worst quality, low quality, lowres, jpeg artifacts, blurry, watermark, "
+    "signature, text, username, bad anatomy, bad hands, extra fingers, "
+    "fewer fingers, deformed, cropped"
+)
+NEGATIVE_BASE_ZH = (
+    "低画质，模糊，噪点，水印，签名，文字，畸形，多余的手指，"
+    "残缺的手指，结构崩坏，裁切不当"
+)
+
+# 标签预算：SD1.5 的 CLIP 只有 77 token，超出部分完全不生效；SDXL 分块编码但
+# 越靠后的标签权重越低。默认 75 是「留一格给质量前缀」的经验值。
+DEFAULT_MAX_TAGS = 75
+
+# —— danbooru 标签清洗 ——
+# CLIP 把 ( ) 当权重语法：角色 tag 不转义会被当权重算坏（萌绘同款事故）。
+_WEIGHT_RE = re.compile(r"\(\s*([^():]*?)\s*:\s*[0-9]*\.?[0-9]+\s*\)")
+_ARTIST_TAG_RE = re.compile(r"^(?:artist\s*:|by\s+)", re.I)
+_PLACEHOLDER_L = "\x00L\x00"
+_PLACEHOLDER_R = "\x00R\x00"
+
+
+def split_tag_list(text) -> list:
+    """逗号（中英文）/ 换行 / 顿号 → 去空标签列表。"""
+    raw = str(text or "").replace("，", ",").replace("、", ",")
+    return [t.strip() for t in re.split(r",|\n|\r", raw) if t.strip()]
+
+
+def normalize_tags(
+    text,
+    *,
+    escape_parens: bool = True,
+    strip_weights: bool = True,
+    drop_artists: bool = True,
+    banned=None,
+    max_tags: int = 0,
+) -> "tuple[str, list]":
+    """清洗 danbooru 串，返回 (清洗后文本, 被禁词剔除的标签列表)。
+
+    顺序很关键：**先解权重再转义括号**。反过来的话 `(tag:1.2)` 会先变成
+    `\\(tag:1.2\\)`，权重语法就再也解析不出来了。
+    """
+    tags = split_tag_list(text)
+    out: list[str] = []
+    seen: set[str] = set()
+    banned_set = {str(b).strip().lower() for b in (banned or []) if str(b or "").strip()}
+    dropped: list[str] = []
+    for tag in tags:
+        t = tag
+        if strip_weights:
+            # (tag:1.2) → tag；嵌套写法迭代两次足够常见情况
+            for _ in range(2):
+                t2 = _WEIGHT_RE.sub(r"\1", t)
+                if t2 == t:
+                    break
+                t = t2
+        if drop_artists and _ARTIST_TAG_RE.match(t.strip()):
+            continue
+        t = t.strip().strip(",").strip()
+        if not t:
+            continue
+        if escape_parens:
+            # 先把已转义的括号保护起来，避免 \\( 变成 \\\\(
+            t = t.replace("\\(", _PLACEHOLDER_L).replace("\\)", _PLACEHOLDER_R)
+            t = t.replace("(", "\\(").replace(")", "\\)")
+            t = t.replace(_PLACEHOLDER_L, "\\(").replace(_PLACEHOLDER_R, "\\)")
+        # 下划线写法与空格等价，统一成空格（dedupe 与可读性都更好）
+        t = t.replace("_", " ").strip()
+        low = t.lower()
+        if banned_set and low in banned_set:
+            dropped.append(t)
+            continue
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(t)
+        if max_tags and len(out) >= int(max_tags):
+            break
+    return ", ".join(out), dropped
+
+
+def normalize_payload(payload: dict, tag_style: str, opts: dict | None = None) -> dict:
+    """按风格清洗 LLM 输出：danbooru 走标签管道，禁词剔除并塞进 negative。
+
+    自然语言风格原样返回 —— 中文正文里的括号/下划线是正常标点，不能按标签处理。
+    """
+    out = dict(payload or {})
+    opts = opts or {}
+    key = _style_key(str(tag_style or ""))
+    if key != "danbooru":
+        return out
+    banned = split_tag_list(opts.get("banned_tags"))
+    # 缺键 → 用代码默认；显式 0 → 不限（别把 0 当成「没填」）
+    raw_max = opts.get("max_tags", DEFAULT_MAX_TAGS)
+    try:
+        max_tags = int(raw_max)
+    except (TypeError, ValueError):
+        max_tags = DEFAULT_MAX_TAGS
+    if max_tags < 0:
+        max_tags = 0
+    prompt, dropped = normalize_tags(
+        out.get("prompt", ""),
+        drop_artists=opt_bool(opts.get("strip_artists"), True),
+        banned=banned,
+        max_tags=max_tags,
+    )
+    negative, _ = normalize_tags(
+        out.get("negative", ""), drop_artists=False, banned=[], max_tags=0
+    )
+    if dropped:
+        # 用户明确不要的东西，顺手写进负向（只删正向等于没管住）
+        negative = _merge_tags(negative, ", ".join(dropped), False)
+    out["prompt"] = prompt
+    out["negative"] = negative
+    return out
+
+
+def apply_negative_base(payload: dict, tag_style: str, opts: dict | None = None) -> dict:
+    """把通用缺陷词垫到 negative 最前（english 线 / 中文线各一套，可清空）。
+
+    缺键用代码常量兜底（老配置升级后没这个键也要有质量保底）；
+    显式空串 = 用户主动关掉，就不再追加。
+    """
+    out = dict(payload or {})
+    opts = opts or {}
+    key = _style_key(str(tag_style or ""))
+    field = "negative_base_zh" if key == "natural" else "negative_base_en"
+    raw = opts.get(field)
+    if raw is None:
+        base = NEGATIVE_BASE_ZH if key == "natural" else NEGATIVE_BASE_EN
+    else:
+        base = str(raw)
+    base = base.strip()
+    if not base:
+        return out
+    out["negative"] = _merge_tags(base, out.get("negative", ""), False)
+    return out
+
+
 def style_pool_for(category: str, scope: str = "both") -> list:
     """类别 × 工作流可画类型 → 风格池。
 
@@ -340,6 +487,20 @@ COMPOSITIONS: list[tuple[str, str]] = [
 LIGHTS: list[str] = [
     "黄昏暖光", "月光冷调", "清晨薄雾光", "霓虹夜色", "逆光剪影",
     "丁达尔光束", "极光绿紫", "星云紫蓝", "烛火暖光", "阴天柔光",
+]
+
+# 镜头层（只给写实线）：写真与肖像差一口气常常就差「什么镜头」。
+# 写成中文短语，让 LLM 自己转成目标语言；danbooru 系会写成 85mm lens / depth of field 类标签。
+LENS_PHOTO: list[str] = [
+    "85mm 定焦 f/1.8 浅景深", "50mm 标准镜头 f/2.8", "135mm 长焦压缩感 f/2",
+    "35mm 环境人像 f/2.8", "广角 24mm 低角度", "微距特写浅景深",
+    "胶片 35mm 颗粒感", "中画幅柔和高宽容度", "长焦逆光轮廓光",
+]
+
+# 媒介层（只给动漫线）：插画的「成品形态」——立绘 / 关键帧 / 封面 / 壁纸
+MEDIUM_ANIME: list[str] = [
+    "角色立绘（无背景或渐变背景）", "动画关键帧质感", "轻小说封面插画",
+    "游戏宣传图构图", "桌面壁纸构图", "画集跨页插画", "分镜特写画面",
 ]
 
 MOODS: list[str] = [
@@ -533,6 +694,15 @@ def draw_brief(
             comp_pool.append((name, ori))
     comp_name, orientation = rng.choice(comp_pool)
 
+    # 镜头 / 媒介层（v0.7.8）：写真线差一口气常常就差「什么镜头」，
+    # 动漫线差的是「成品形态」（立绘/封面/壁纸）。写实与动漫各抽一条，
+    # both 且没有风格组的题材（风景/星空…）不硬加。
+    group = "photo" if wf_scope == "photo" else (
+        "anime" if wf_scope == "anime" else CATEGORY_STYLE_GROUP.get(category, "all")
+    )
+    lens = rng.choice(LENS_PHOTO) if group == "photo" else ""
+    medium = rng.choice(MEDIUM_ANIME) if group == "anime" else ""
+
     return {
         "category": category,
         "subject": subject,
@@ -542,6 +712,8 @@ def draw_brief(
         "light": light,
         "mood": mood,
         "scope": wf_scope,
+        "lens": lens,
+        "medium": medium,
     }
 
 
@@ -553,12 +725,18 @@ def brief_text(brief: dict, theme: str = "") -> str:
     """
     subject = theme.strip() or brief.get("subject", "")
     scope = SCOPE_LABEL_ZH[normalize_scope(brief.get("scope"))]
-    return (
+    text = (
         f"类别={brief.get('category', '')}；题材={subject}；风格={brief.get('style', '')}；"
         f"可画类型={scope}；"
         f"构图={brief.get('composition', '')}；光色={brief.get('light', '')}；"
         f"氛围={brief.get('mood', '')}"
     )
+    # 镜头 / 媒介只在抽到时有（写实线才有镜头，动漫线才有媒介）
+    if str(brief.get("lens") or "").strip():
+        text += f"；镜头={brief['lens']}"
+    if str(brief.get("medium") or "").strip():
+        text += f"；成品形态={brief['medium']}"
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -578,7 +756,7 @@ _SYSTEM_BODIES: dict[str, str] = {
         "你是一位顶级 AI 绘画提示词工程师，为支持中文的模型（如 Qwen-Image）写文生图提示词。\n"
         "用户会给你一份「创作简报」，请把它写成高质量的中文画面描述。\n"
         "【prompt 要求】2~4 句连贯中文：主体与细节 → 环境与背景 → 镜头与构图 → "
-        "光线与氛围。严格贴合简报的题材/风格/构图/光色/氛围，不要偏题，"
+        "光线与氛围。严格贴合简报的题材/风格/构图/光色/氛围（简报给了镜头或成品形态就照写），不要偏题，"
         "不要写成标签堆砌，总长 80~200 字。\n"
         "【negative 要求】中文，只写常见缺陷（如：模糊，畸形，多余的手指，"
         "低画质，水印），不确定就空串。\n"
@@ -590,7 +768,8 @@ _SYSTEM_BODIES: dict[str, str] = {
         "English prompt.\n"
         "【prompt】2-4 flowing English sentences: subject and details -> environment "
         "and background -> camera and composition -> lighting and mood. Follow the "
-        "brief's subject/style/composition/light/mood exactly; do not drift into a "
+        "brief's subject/style/composition/light/mood (and lens/format when given) "
+        "exactly; do not drift into a "
         "generic portrait; no tag dumps, no artist names, 60-150 words.\n"
         "【negative】English, short, only common defects (blurry, deformed, extra "
         "fingers, low quality, watermark); empty string if unsure.\n"
@@ -603,7 +782,8 @@ _SYSTEM_BODIES: dict[str, str] = {
         "1. 小写英文标签，逗号分隔，不要写成句子；30~55 个标签。\n"
         "2. 从主到次：内容型主标签（1girl/1boy/scenery/no humans 等按内容定）→ "
         "主体外观细节 → 服装 → 动作姿势 → 场景背景 → 构图视角 → 光线氛围。\n"
-        "3. 严格贴合简报的题材/风格/构图/光色/氛围，不要偏题，不要偷换成「站在街边的普通少女」。\n"
+        "3. 严格贴合简报的题材/风格/构图/光色/氛围（简报给了镜头或成品形态就照写），"
+        "不要偏题，不要偷换成「站在街边的普通少女」。\n"
         "4. 质量词（masterpiece/best quality 等）由系统自动添加，你不要写。\n"
         "5. 不写 artist 名。\n"
         "【negative 要求】英文小写标签串（如 lowres, bad anatomy, bad hands, "
@@ -680,10 +860,14 @@ def build_system_prompt(tag_style: str, opts: dict | None = None, scope: str = "
 
 
 def _merge_tags(text: str, tags: str, front: bool) -> str:
-    """把逗号分隔的标签补进文本，已存在的（不区分大小写）不重复加。"""
-    cur = str(text or "").strip().strip(",").strip()
-    parts = [t.strip() for t in str(tags or "").split(",") if t.strip()]
-    have = {t.strip().lower() for t in cur.split(",") if t.strip()}
+    """把标签补进文本，已存在的（不区分大小写）不重复加。
+
+    中英文逗号都认：中文排除词（如「儿童，未成年」）此前整段被当成**一个**标签，
+    dedupe 等于没做，还会把整串粘在末尾。
+    """
+    cur = str(text or "").strip().strip(",，").strip()
+    parts = split_tag_list(tags)
+    have = {t.lower() for t in split_tag_list(cur)}
     missing = [t for t in parts if t.lower() not in have]
     if not missing:
         return cur
@@ -779,6 +963,48 @@ def build_user_prompt(brief: dict, theme: str = "") -> str:
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
+def _extract_json_object(raw: str) -> str:
+    """从可能带围栏/解释的文本里抠出最外层 {…}；抠不出返回空串。"""
+    text = str(raw or "").strip()
+    m = _FENCE_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    if text.startswith("{"):
+        return text
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return ""
+    return text[start : end + 1]
+
+
+def parse_score_payload(text) -> "dict | None":
+    """解析质检输出：{"score": 0~100, "issues": [...]}；不合契约返回 None。
+
+    宽容处理（质检模型不保证听话）：允许围栏/前后解释、score 写成 "82" 或 82.0、
+    issues 写成字符串或数组。分数越界直接夹到 0~100。
+    """
+    raw = _extract_json_object(str(text or ""))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        score = float(str(data.get("score")).strip())
+    except (TypeError, ValueError):
+        return None
+    score = int(max(0, min(100, round(score))))
+    issues = data.get("issues")
+    if isinstance(issues, (list, tuple)):
+        text_issues = "；".join(str(x).strip() for x in issues if str(x or "").strip())
+    else:
+        text_issues = str(issues or "").strip()
+    return {"score": score, "issues": text_issues[:300]}
+
+
 def parse_llm_payload(text: str) -> dict:
     """解析 LLM 输出为 {"prompt","negative","caption"}；不合法抛 ValueError（中文原因）。"""
     raw = str(text or "").strip()
@@ -847,14 +1073,16 @@ def _ratio_of(wh) -> float:
 
 
 def pick_size(
-    sizes: dict, orientation: str, composition_name: str, rng: random.Random
+    sizes: dict, orientation: str, composition_name: str, rng: random.Random,
+    ratio: float | None = None,
 ) -> tuple[int, int]:
     """按「朝向 + 构图」从模板白名单落宽高 —— 每张图各不相同。
 
     1. 朝向（横/竖/方）决定取哪一组候选，朝向由当次抽签的构图决定；
     2. 组内按构图名匹配目标长宽比（超广角/全景/俯瞰偏横，全身像偏瘦高，
        特写/半身像偏 3:4），选出最接近的若干档随机取一个；
-    3. 构图认不出（自定义词池）→ 组内纯随机。
+    3. 构图认不出（自定义词池）→ 组内纯随机；
+    4. 用户用 `--ratio 3:2` 显式指定比例时，以它为准（覆盖构图推断）。
     """
     cands = (sizes or {}).get(orientation) or (sizes or {}).get("square") or [[1024, 1024]]
     cands = [[int(c[0]), int(c[1])] for c in cands if len(c) >= 2]
@@ -862,7 +1090,10 @@ def pick_size(
         return 1024, 1024
     if len(cands) == 1:
         return cands[0][0], cands[0][1]
-    target = composition_ratio(composition_name)
+    try:
+        target = float(ratio) if ratio else composition_ratio(composition_name)
+    except (TypeError, ValueError):
+        target = composition_ratio(composition_name)
     if target is None:
         pick = rng.choice(cands)
     else:
@@ -871,3 +1102,91 @@ def pick_size(
         pool = [wh for wh in scored if abs(_ratio_of(wh) - target) <= best + _RATIO_TOLERANCE]
         pick = rng.choice(pool)
     return int(pick[0]), int(pick[1])
+
+
+# --------------------------------------------------------------------------- #
+# 指令参数（v0.7.8）：/绘卷 画一张 少女 --no blurry --style 胶片 --ratio 3:2 --seed 42
+# --------------------------------------------------------------------------- #
+
+_RATIO_ALIAS = {
+    "横": (1.78, "landscape"), "横图": (1.78, "landscape"), "横版": (1.78, "landscape"),
+    "竖": (1.78, "portrait"), "竖图": (1.78, "portrait"), "竖版": (1.78, "portrait"),
+    "方": (1.0, "square"), "正方": (1.0, "square"), "正方形": (1.0, "square"),
+    "方形": (1.0, "square"),
+}
+
+
+def parse_ratio(text) -> "tuple[float | None, str]":
+    """"3:2" / "3x2" / "横" / "竖" / "方" → (长宽比, 朝向)；认不出返回 (None, "")。"""
+    raw = str(text or "").strip().lower().replace("：", ":").replace("×", "x").replace("x", ":")
+    raw = raw.replace("比", ":")
+    if not raw:
+        return None, ""
+    if raw in _RATIO_ALIAS:
+        return _RATIO_ALIAS[raw]
+    if ":" in raw:
+        a, _, b = raw.partition(":")
+        try:
+            w, h = float(a), float(b)
+        except (TypeError, ValueError):
+            return None, ""
+        if w <= 0 or h <= 0:
+            return None, ""
+        if abs(w - h) < 1e-9:
+            return 1.0, "square"
+        return round(max(w, h) / min(w, h), 3), ("landscape" if w > h else "portrait")
+    return None, ""
+
+
+def parse_draw_args(text) -> dict:
+    """解析「画一张」后面的主题词与开关（顺序任意，`--k v` 与 `--k=v` 都认）。
+
+    --no     追加负向词（逗号分隔）
+    --style  强制风格，覆盖抽签的风格层（如 "胶片摄影颗粒感"）
+    --ratio  长宽比（3:2 / 横 / 竖 / 方），同时决定朝向
+    --seed   固定种子，便于复现
+    认不出的开关写进 error，主题词是其余所有文本。纯函数，便于自检。
+    """
+    tokens = str(text or "").split()
+    out: dict = {
+        "theme": "", "negative": "", "style": "", "ratio": None,
+        "orientation": "", "seed": None, "error": "",
+    }
+    rest: list[str] = []
+    neg: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("--"):
+            rest.append(tok)
+            i += 1
+            continue
+        key, _, inline = tok.partition("=")
+        key = key.strip().lower()
+        vals: list[str] = [inline] if inline else []
+        i += 1
+        while i < len(tokens) and not tokens[i].startswith("--"):
+            vals.append(tokens[i])
+            i += 1
+        value = " ".join(v for v in vals if v).strip()
+        if key in ("--no", "--negative"):
+            if value:
+                neg.append(value)
+        elif key in ("--style", "--风格"):
+            out["style"] = value[:30]
+        elif key in ("--ratio", "--ar", "--比例"):
+            ratio, ori = parse_ratio(value)
+            if ratio is None:
+                out["error"] = f"看不懂的长宽比：{value}（写 3:2 / 横 / 竖 / 方）"
+            else:
+                out["ratio"], out["orientation"] = ratio, ori
+        elif key in ("--seed", "--种子"):
+            try:
+                out["seed"] = abs(int(float(value))) % (2**63)
+            except (TypeError, ValueError):
+                out["error"] = f"种子必须是整数：{value}"
+        else:
+            out["error"] = f"不认识的开关：{key}（可用 --no / --style / --ratio / --seed）"
+    out["theme"] = " ".join(rest).strip()
+    out["negative"] = ", ".join(x for x in neg if x)
+    return out

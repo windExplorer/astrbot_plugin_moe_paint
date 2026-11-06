@@ -132,7 +132,18 @@ export interface GenRecord {
   starred: 0 | 1 | number;
   /** 1 = 图片已按容量上限清理（记录仍在，可看提示词/简报） */
   pruned?: 0 | 1 | number;
+  /** 成图自检分数（0~100；没开自检时为 null） */
+  score?: number | null;
+  score_reason?: string;
   delivered?: DeliveredItem[];
+}
+
+export interface PromptPreset {
+  name: string;
+  prompt: string;
+  width: number;
+  height: number;
+  workflow: string;
 }
 
 export interface TemplatePublic {
@@ -153,6 +164,8 @@ export interface TemplatePublic {
   subject_scope?: string;
   scope?: string;
   key?: string;
+  /** 实际生效的采样参数覆盖（steps/cfg/sampler_name/scheduler） */
+  params?: Record<string, any>;
 }
 
 export interface RotationItem {
@@ -228,6 +241,10 @@ export interface StatsPayload {
   by_category: { category: string; success: number; failed: number }[];
   by_workflow: { workflow: string; success: number; failed: number }[];
   days: { day: string; success: number }[];
+  /** 成图自检：平均分 / 有分数的张数 / 低分（<60）张数 */
+  score_avg?: number | null;
+  score_count?: number;
+  score_low?: number;
 }
 
 export interface AnimaServer {
@@ -301,6 +318,10 @@ export interface LlmPreview {
   llm_provider: string;
   llm_ms: number;
   total_ms: number;
+  /** 正向标签数（danbooru 系；超过 max_tags 会被截断） */
+  tag_count?: number;
+  /** 指令参数解析问题（有值说明某个开关被忽略） */
+  args_note?: string;
 }
 
 export interface ProviderRow {
@@ -372,6 +393,33 @@ export function apiResend(id: number) {
     { id },
     60000,
   );
+}
+
+/** 按已有记录重画：same = 同 seed，variant = 换 seed。 */
+export function apiRedraw(id: number, mode: "same" | "variant" = "variant") {
+  return apiPost<{ started: boolean; same_seed: boolean }>("/record/redraw", { id, mode });
+}
+
+/** 提示词收藏列表（不含负向词）。 */
+export function apiPromptPresets() {
+  return apiGet<{ items: PromptPreset[] }>("/prompt/presets", 15000);
+}
+
+export function apiPromptPresetSave(id: number, name: string) {
+  return apiPost<{ name: string }>("/prompt/preset", { action: "save", id, name });
+}
+
+export function apiPromptPresetDelete(name: string) {
+  return apiPost<{ ok: boolean }>("/prompt/preset", { action: "delete", name });
+}
+
+export function apiPromptPresetDraw(name: string) {
+  return apiPost<{ started: boolean }>("/prompt/preset", { action: "draw", name });
+}
+
+/** 对已有记录跑一次成图自检（用于校准阈值，不改状态）。 */
+export function apiDebugScore(id: number) {
+  return apiPost<{ score: number; issues: string }>("/debug/score", { id }, 120000);
 }
 
 export interface AnimaWorkflowRow {

@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS generations (
     error           TEXT    NOT NULL DEFAULT '',
     delivered_json  TEXT    NOT NULL DEFAULT '[]',
     starred         INTEGER NOT NULL DEFAULT 0,
-    pruned          INTEGER NOT NULL DEFAULT 0
+    pruned          INTEGER NOT NULL DEFAULT 0,
+    score           INTEGER,
+    score_reason    TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gen_ts      ON generations(ts);
 CREATE INDEX IF NOT EXISTS idx_gen_status  ON generations(status, ts);
@@ -66,12 +68,14 @@ _UPDATE_COLS = {
     "status", "reason", "category", "brief", "prompt", "negative", "tag_style",
     "workflow", "width", "height", "seed", "comfy_prompt_id", "image_relpath",
     "sha256", "caption", "llm_provider", "llm_latency_ms", "gen_latency_ms",
-    "error", "delivered_json", "starred", "pruned",
+    "error", "delivered_json", "starred", "pruned", "score", "score_reason",
 }
 
 # 老库升级时要补的列（CREATE TABLE IF NOT EXISTS 不会给已有表加列）
 _MIGRATE_COLUMNS = {
     "pruned": "INTEGER NOT NULL DEFAULT 0",
+    "score": "INTEGER",
+    "score_reason": "TEXT NOT NULL DEFAULT ''",
 }
 
 _MIME = {
@@ -142,6 +146,47 @@ def archive_image(gallery_dir: Path, data: bytes, ext: str) -> tuple[str, str, s
     tmp.write_bytes(data)
     os.replace(tmp, path)  # 原子替换，断电不留半个文件
     return str(path), rel, short, False
+
+
+def suspect_blank(data: bytes, filename: str = "") -> str:
+    """成品体检：全黑 / 全白 / 几乎单色 / 文件过小 → 返回人话原因，正常返回 ""。
+
+    为什么需要：ComfyUI 在底模或 VAE 不匹配、自定义节点静默失败时**不会报错**，
+    而是老老实实返回一张全黑 PNG。以前这张图会被当成功存档、写进图库、投进群里，
+    用户只能看到「画了张黑图」却不知道为什么。Pillow 不可用时只做体积兜底。
+    """
+    if not data:
+        return "图片内容为空"
+    # 1KB 以下的「图片」基本只可能是空图/损坏文件（真实出图哪怕 256² 也有几十 KB）；
+    # 阈值再高会误伤极简构图的合法小图。
+    if len(data) < 1024:
+        return f"文件过小（{len(data)} 字节，疑似空图）"
+    try:
+        import io
+
+        from PIL import Image
+    except Exception:
+        return ""
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            small = im.convert("RGB").resize((32, 32))
+            pixels = list(small.getdata())
+    except Exception:
+        return ""  # 格式认不出：交给下游，别因为体检误伤正常图
+    if not pixels:
+        return "图片没有像素"
+    n = float(len(pixels))
+    mean = sum((sum(p) / 3.0) for p in pixels) / n
+    lo = min(min(p) for p in pixels)
+    hi = max(max(p) for p in pixels)
+    # 先判「全黑/全白」（原因更具体、更能指向底模或 VAE 问题），再判纯色
+    if mean < 6:
+        return "几乎全黑（底模/VAE 可能不匹配）"
+    if mean > 250:
+        return "几乎全白（曝光或节点参数异常）"
+    if hi - lo <= 6:
+        return f"几乎单色（平均亮度 {mean:.0f}）"
+    return ""
 
 
 class Store:
@@ -401,6 +446,19 @@ class Store:
                 "GROUP BY day ORDER BY day"
             )
             out["days"] = [{"day": r["day"], "success": int(r["n"])} for r in await cur.fetchall()]
+            # 质检分（v0.7.8）：只在开过成图自检的库里有值
+            cur = await db.execute(
+                "SELECT AVG(score) AS avg_score, COUNT(score) AS n, "
+                "SUM(CASE WHEN score < 60 THEN 1 ELSE 0 END) AS low_n "
+                "FROM generations WHERE score IS NOT NULL"
+            )
+            row = await cur.fetchone()
+            out["score_avg"] = (
+                round(float(row["avg_score"]), 1)
+                if row and row["avg_score"] is not None else None
+            )
+            out["score_count"] = int((row["n"] if row else 0) or 0)
+            out["score_low"] = int((row["low_n"] if row else 0) or 0)
         return out
 
     async def mark_pruned(self, relpaths: list) -> int:
@@ -450,6 +508,21 @@ class Store:
                 (str(key), str(value)),
             )
             await db.commit()
+
+    async def delete_meta(self, key: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("DELETE FROM meta WHERE k=?", (str(key),))
+            await db.commit()
+
+    async def list_meta(self, prefix: str = "") -> list:
+        """按前缀列出 meta（提示词收藏等小对象都放这儿，不占主表列）。"""
+        p = str(prefix or "")
+        pattern = p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT k, v FROM meta WHERE k LIKE ? ESCAPE '\\' ORDER BY k", (pattern,)
+            )
+            return [(str(r[0]), str(r[1])) for r in await cur.fetchall()]
 
 
 async def prune_gallery(gallery_dir: Path, db: "Store", max_total_mb: float) -> int:

@@ -417,5 +417,89 @@ check("anchor_persona_off_still_anchors", "anime style" in prompter.apply_person
     b, "danbooru", {"category": "风景场景"}, {"persona_enabled": False}, "anime")["prompt"])
 check("anchor_no_mutate", b["prompt"] == "scenery, night, milky way")
 
+# ---------- v0.7.8：danbooru 标签规范化 ----------
+clean, dropped = prompter.normalize_tags(
+    "1girl, hatsune miku (vocaloid), (detailed eyes:1.3), 1GIRL, artist:someone, by foo, blue_hair"
+)
+check("norm_weight_unwrapped", "(detailed eyes" not in clean and "detailed eyes" in clean, clean)
+check("norm_paren_escaped", "hatsune miku \\(vocaloid\\)" in clean, clean)
+check("norm_dedupe", clean.lower().count("1girl") == 1, clean)
+check("norm_artist_dropped", "artist:" not in clean and "by foo" not in clean, clean)
+check("norm_underscore", "blue hair" in clean, clean)
+check("norm_banned", dropped == [] and "1girl" in clean, str(dropped))
+c2, d2 = prompter.normalize_tags("1girl, nude, solo", banned=["nude"])
+check("norm_banned_removed", "nude" not in c2 and d2 == ["nude"], f"{c2} {d2}")
+c3, _ = prompter.normalize_tags("a, b, c, d", max_tags=2)
+check("norm_max_tags", c3 == "a, b", c3)
+c4, _ = prompter.normalize_tags("tag \\(already\\)")
+check("norm_no_double_escape", c4 == "tag \\(already\\)", c4)
+
+# normalize_payload：只对 danbooru；禁词进负向；自然语言原样
+p = prompter.normalize_payload(
+    {"prompt": "1girl (smile), nude", "negative": ""}, "danbooru", {"banned_tags": "nude"}
+)
+check("norm_payload_danbooru", "1girl \\(smile\\)" in p["prompt"] and "nude" in p["negative"], str(p))
+p_nat = prompter.normalize_payload({"prompt": "（中文括号）不需要转义", "negative": ""}, "natural", {})
+check("norm_payload_natural_untouched", p_nat["prompt"] == "（中文括号）不需要转义", p_nat["prompt"])
+
+# apply_negative_base：英文线/中文线；可清空
+nb = prompter.apply_negative_base({"prompt": "x", "negative": "extra defect"}, "danbooru", {})
+check("neg_base_en",
+      nb["negative"].startswith("worst quality") and nb["negative"].endswith("extra defect"),
+      nb["negative"])
+check("neg_base_en_dedupe",
+      prompter.apply_negative_base({"prompt": "x", "negative": "lowres"}, "danbooru", {})["negative"]
+      .count("lowres") == 1,
+      prompter.apply_negative_base({"prompt": "x", "negative": "lowres"}, "danbooru", {})["negative"])
+nb2 = prompter.apply_negative_base({"prompt": "x", "negative": ""}, "natural", {})
+check("neg_base_zh", "低画质" in nb2["negative"], nb2["negative"])
+nb3 = prompter.apply_negative_base({"prompt": "x", "negative": "a"}, "danbooru", {"negative_base_en": ""})
+check("neg_base_off", nb3["negative"] == "a", nb3["negative"])
+
+# _merge_tags 认中文逗号（否则整串当成一个标签，dedupe 等于没做）
+merged = prompter._merge_tags("低画质", "低画质，水印", False)
+check("merge_tags_zh_dedupe", merged == "低画质, 水印", merged)
+
+# ---------- v0.7.8：镜头 / 媒介层 ----------
+b_anime = prompter.draw_brief(random.Random(7), scope="anime")
+b_photo = prompter.draw_brief(random.Random(7), scope="photo")
+b_both = prompter.draw_brief(random.Random(7), scope="both", disabled_categories={
+    "美少女", "动漫少女", "真人少女", "写真摄影", "动漫角色", "游戏角色", "人物肖像",
+})
+check("brief_anime_medium", bool(b_anime.get("medium")) and not b_anime.get("lens"), str(b_anime))
+check("brief_photo_lens", bool(b_photo.get("lens")) and not b_photo.get("medium"), str(b_photo))
+check("brief_both_neither", not b_both.get("lens") and not b_both.get("medium"), str(b_both))
+check("brief_text_has_lens", "镜头=" in prompter.brief_text(b_photo), prompter.brief_text(b_photo))
+
+# ---------- v0.7.8：指令参数 ----------
+a = prompter.parse_draw_args("樱花少女 --no blurry,watermark --ratio 3:2 --seed 42")
+check("args_theme", a["theme"] == "樱花少女", a["theme"])
+check("args_negative", a["negative"] == "blurry,watermark", a["negative"])
+check("args_ratio", a["ratio"] == 1.5 and a["orientation"] == "landscape", str(a))
+check("args_seed", a["seed"] == 42, str(a["seed"]))
+check("args_error_empty", a["error"] == "", a["error"])
+a2 = prompter.parse_draw_args("少女 --style=胶片摄影颗粒感")
+check("args_style_inline", a2["theme"] == "少女" and a2["style"] == "胶片摄影颗粒感", str(a2))
+a3 = prompter.parse_draw_args("少女 --unknown x")
+check("args_unknown_key", "不认识" in a3["error"], a3["error"])
+check("args_ratio_alias_square", prompter.parse_ratio("方") == (1.0, "square"))
+check("args_ratio_bad", prompter.parse_ratio("abc:0") == (None, ""))
+check("args_ratio_portrait", prompter.parse_ratio("2:3")[1] == "portrait")
+
+# pick_size 显式比例优先
+sizes = prompter.SIZE_PRESETS["sdxl"]
+w, h = prompter.pick_size(sizes, "landscape", "特写·竖幅", random.Random(3), ratio=1.78)
+check("pick_size_ratio_override", max(w, h) / min(w, h) >= 1.3, f"{w}x{h}")
+
+# ---------- v0.7.8：质检契约 ----------
+sc = prompter.parse_score_payload('{"score": 82, "issues": ["手指略崩", "背景糊"]}')
+check("score_parse_basic", sc["score"] == 82 and "手指" in sc["issues"], str(sc))
+sc2 = prompter.parse_score_payload('```json\n{"score": "95", "issues": ""}\n```')
+check("score_parse_fenced_str", sc2["score"] == 95 and sc2["issues"] == "", str(sc2))
+sc3 = prompter.parse_score_payload('评分如下：{"score": 140}')
+check("score_clamped", sc3["score"] == 100, str(sc3))
+check("score_parse_garbage", prompter.parse_score_payload("我觉得不错") is None)
+check("score_parse_no_score", prompter.parse_score_payload('{"issues": []}') is None)
+
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

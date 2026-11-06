@@ -3,7 +3,7 @@
 // 只提交本页涉及的 prompt.* 扁平点号键，不整份回传配置。
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { NButton, NInput, NSelect, NSwitch, NTag, useMessage } from "naive-ui";
+import { NButton, NInput, NInputNumber, NSelect, NSwitch, NTag, useMessage } from "naive-ui";
 import { apiPromptPreview, type PromptPreviewStyle } from "../api";
 import { cfgBool, cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
 
@@ -21,6 +21,12 @@ const PROMPT_KEYS = [
   "prompt.override_danbooru",
   "prompt.override_natural",
   "prompt.override_natural_en",
+  "prompt.negative_base_en",
+  "prompt.negative_base_zh",
+  "prompt.quality_extra",
+  "prompt.banned_tags",
+  "prompt.strip_artists",
+  "prompt.max_tags",
 ];
 
 /** 画风硬锚定总开关（关掉则退回「可画类型只筛题材」的旧行为）。 */
@@ -208,6 +214,78 @@ onMounted(async () => {
         placeholder="画面里不要出现文字；偏好柔和的暖色调…"
         @update:value="(v: string) => set('prompt.extra_rules', v)"
       />
+    </div>
+
+    <!-- 负面基线与标签清洗 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">负面基线与标签清洗</div>
+        <n-button size="small" type="primary" :loading="!!saving['提示词']" @click="save">保存本页</n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        负面基线永远垫在 negative 最前（LLM 给空串时也有质量兜底）；标签清洗只对 danbooru 风格生效——
+        它会解掉 `(tag:1.2)` 权重、把括号转义成 `\(`（否则 CLIP 当场权重）、去重、剔除画师名。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field mp-field--wide">
+          <span class="label">负面基线 · 英文线（danbooru / natural_en）</span>
+          <n-input
+            :value="String(cfgGet('prompt.negative_base_en', ''))"
+            type="textarea"
+            :rows="3"
+            size="small"
+            placeholder="留空 = 不追加"
+            @update:value="(v: string) => set('prompt.negative_base_en', v)"
+          />
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">负面基线 · 中文线（Qwen 等）</span>
+          <n-input
+            :value="String(cfgGet('prompt.negative_base_zh', ''))"
+            type="textarea"
+            :rows="3"
+            size="small"
+            placeholder="留空 = 不追加"
+            @update:value="(v: string) => set('prompt.negative_base_zh', v)"
+          />
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">追加质量词（仅 danbooru）</span>
+          <n-input
+            :value="String(cfgGet('prompt.quality_extra', ''))"
+            size="small"
+            placeholder="如 detailed eyes, cinematic lighting（不用重复写 masterpiece）"
+            @update:value="(v: string) => set('prompt.quality_extra', v)"
+          />
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">禁词（从正向剔除并写进负向）</span>
+          <n-input
+            :value="String(cfgGet('prompt.banned_tags', ''))"
+            size="small"
+            placeholder="逗号分隔，如 nude, text"
+            @update:value="(v: string) => set('prompt.banned_tags', v)"
+          />
+        </label>
+        <label class="mp-field">
+          <span class="label">剔除画师名</span>
+          <n-switch
+            :value="cfgBool('prompt.strip_artists', true)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.strip_artists', v)"
+          />
+          <span class="mp-sub">删掉 artist:xxx / by xxx</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">正向标签上限（0 = 不限）</span>
+          <n-input-number
+            :value="Number(cfgGet('prompt.max_tags', 75))"
+            :min="0" :max="300" size="small"
+            @update:value="(v: number | null) => set('prompt.max_tags', v ?? 75)"
+          />
+          <span class="mp-sub">SD1.5 只有 77 token，超出部分不生效</span>
+        </label>
+      </div>
     </div>
 
     <!-- 完全覆盖（高级） -->

@@ -20,12 +20,19 @@ import {
   useMessage,
 } from "naive-ui";
 import {
+  apiDebugScore,
   apiDeleteRecord,
+  apiPromptPresetDelete,
+  apiPromptPresetDraw,
+  apiPromptPresetSave,
+  apiPromptPresets,
   apiRecords,
+  apiRedraw,
   apiResend,
   apiStar,
   apiThumb,
   type GenRecord,
+  type PromptPreset,
 } from "../api";
 import { refreshStats, stats, status } from "../store";
 import { useAutoRefresh } from "../polling";
@@ -53,6 +60,12 @@ const detailShow = ref(false);
 const detailLoading = ref(false);
 const detailBig = ref("");
 const acting = ref(false);
+
+// 提示词收藏（v0.7.8）：存 meta，不占记录表
+const presets = ref<PromptPreset[]>([]);
+const presetName = ref("");
+const presetBusy = ref(false);
+const scoring = ref(false);
 
 // 全屏看图
 const viewerShow = ref(false);
@@ -269,10 +282,99 @@ function copy(text: string, label: string) {
   copyText(text, label, (m) => message.success(m));
 }
 
+// ---------------- 重画 / 收藏 / 试评分（v0.7.8） ----------------
+
+async function redraw(rec: GenRecord, mode: "same" | "variant") {
+  acting.value = true;
+  try {
+    const d = await apiRedraw(rec.id, mode);
+    if (d.started) {
+      message.success(mode === "same" ? "已按同一种子重画，稍后出现在图库" : "已用同一提示词重画，稍后出现在图库");
+      detailShow.value = false;
+    }
+  } catch (e: any) {
+    message.error(`重画失败：${e?.message || e}`);
+  } finally {
+    acting.value = false;
+  }
+}
+
+async function scoreNow(rec: GenRecord) {
+  scoring.value = true;
+  try {
+    const d = await apiDebugScore(rec.id);
+    rec.score = d.score;
+    rec.score_reason = d.issues;
+    if (detail.value?.id === rec.id) {
+      detail.value.score = d.score;
+      detail.value.score_reason = d.issues;
+    }
+    message.success(`质检 ${d.score} 分${d.issues ? `：${d.issues}` : ""}`);
+  } catch (e: any) {
+    message.error(`评分失败：${e?.message || e}`);
+  } finally {
+    scoring.value = false;
+  }
+}
+
+async function loadPresets() {
+  try {
+    const d = await apiPromptPresets();
+    presets.value = d.items || [];
+  } catch {
+    /* 收藏列表失败不影响主流程 */
+  }
+}
+
+async function savePreset(rec: GenRecord) {
+  const name = presetName.value.trim();
+  if (!name) {
+    message.warning("先给这份提示词起个名字");
+    return;
+  }
+  presetBusy.value = true;
+  try {
+    await apiPromptPresetSave(rec.id, name);
+    presetName.value = "";
+    message.success(`已收藏「${name}」`);
+    await loadPresets();
+  } catch (e: any) {
+    message.error(`收藏失败：${e?.message || e}`);
+  } finally {
+    presetBusy.value = false;
+  }
+}
+
+async function drawPreset(name: string) {
+  presetBusy.value = true;
+  try {
+    await apiPromptPresetDraw(name);
+    message.success("已开始用这个收藏作画，稍后出现在图库");
+  } catch (e: any) {
+    message.error(`触发失败：${e?.message || e}`);
+  } finally {
+    presetBusy.value = false;
+  }
+}
+
+async function delPreset(name: string) {
+  presetBusy.value = true;
+  try {
+    await apiPromptPresetDelete(name);
+    message.success("已删除收藏");
+    await loadPresets();
+  } catch (e: any) {
+    message.error(`删除失败：${e?.message || e}`);
+  } finally {
+    presetBusy.value = false;
+  }
+}
+
 onMounted(() => {
   void loadRecords();
   // 类别下拉依赖全局统计（stats.by_category），本页不一定刷过
   void refreshStats();
+  void loadPresets();
 });
 </script>
 
@@ -303,6 +405,29 @@ onMounted(() => {
         </span>
         <span class="mp-sub">共 {{ total }} 条</span>
         <n-button size="small" quaternary :loading="loading" @click="loadRecords(false)">刷新</n-button>
+      </div>
+    </div>
+
+    <!-- 提示词收藏：把满意的提示词存下来反复用 -->
+    <div v-if="presets.length" class="mp-card presets">
+      <div class="mp-card-head">
+        <div class="mp-card-title">提示词收藏</div>
+        <span class="mp-sub">用它们直接再画一张（换种子）</span>
+      </div>
+      <div class="preset-list">
+        <div v-for="p in presets" :key="p.name" class="preset-item">
+          <span class="pname" :title="p.prompt">{{ p.name }}</span>
+          <span class="mp-sub mp-mono">{{ p.width || "?" }}×{{ p.height || "?" }}</span>
+          <n-button size="tiny" type="primary" ghost :loading="presetBusy" @click="drawPreset(p.name)">
+            画一张
+          </n-button>
+          <n-popconfirm @positive-click="delPreset(p.name)">
+            <template #trigger>
+              <n-button size="tiny" quaternary>删除</n-button>
+            </template>
+            删除收藏「{{ p.name }}」？（不影响已生成的图）
+          </n-popconfirm>
+        </div>
       </div>
     </div>
 
@@ -345,6 +470,14 @@ onMounted(() => {
               {{ r.workflow || "?" }}
               <template v-if="r.status === 'success'"> · {{ r.width }}×{{ r.height }}</template>
               · {{ fmtTs(r.ts) }}
+              <span
+                v-if="r.score != null"
+                class="score"
+                :class="{ low: Number(r.score) < 60 }"
+                :title="r.score_reason || ''"
+              >
+                质检 {{ r.score }}
+              </span>
             </div>
             <div v-if="r.status === 'failed'" class="errmsg">
               {{ r.error || "（无错误详情：可能是旧版本记录或进程中断）" }}
@@ -398,6 +531,28 @@ onMounted(() => {
             >
               重投白名单
             </n-button>
+            <n-button
+              size="small"
+              :disabled="!detail.prompt || acting"
+              @click="redraw(detail, 'same')"
+            >
+              同 seed 重画
+            </n-button>
+            <n-button
+              size="small"
+              :disabled="!detail.prompt || acting"
+              @click="redraw(detail, 'variant')"
+            >
+              换 seed 变体
+            </n-button>
+            <n-button
+              size="small"
+              :disabled="!detail.image_relpath || scoring"
+              :loading="scoring"
+              @click="scoreNow(detail)"
+            >
+              试评分
+            </n-button>
             <n-button size="small" @click="copy(detail.prompt, '提示词')">复制提示词</n-button>
             <n-popconfirm @positive-click="del(detail)">
               <template #trigger>
@@ -437,6 +592,15 @@ onMounted(() => {
             </n-descriptions-item>
             <n-descriptions-item label="LLM">{{ detail.llm_provider || "-" }}</n-descriptions-item>
             <n-descriptions-item label="触发">{{ detail.reason }}</n-descriptions-item>
+            <n-descriptions-item label="质检">
+              <template v-if="detail.score != null">
+                <n-tag size="small" :type="Number(detail.score) >= 60 ? 'success' : 'error'">
+                  {{ detail.score }}
+                </n-tag>
+                <span v-if="detail.score_reason" class="mp-sub"> {{ detail.score_reason }}</span>
+              </template>
+              <span v-else class="mp-sub">未评分</span>
+            </n-descriptions-item>
             <n-descriptions-item :span="2" label="ComfyUI 任务">
               {{ detail.comfy_prompt_id || "-" }}
             </n-descriptions-item>
@@ -458,6 +622,18 @@ onMounted(() => {
             <n-tag size="small" :type="d.ok ? 'success' : 'error'">{{ d.ok ? "已送达" : "失败" }}</n-tag>
             <span class="mp-mono">{{ d.umo }}</span>
             <span v-if="!d.ok && d.error" class="mp-err">：{{ d.error }}</span>
+          </div>
+
+          <div class="sect">收藏此提示词</div>
+          <div class="inline">
+            <n-input
+              v-model:value="presetName"
+              size="small"
+              placeholder="起个名字，如「夜景少女-胶片」"
+              style="max-width: 240px"
+            />
+            <n-button size="small" :loading="presetBusy" @click="savePreset(detail)">收藏</n-button>
+            <span class="mp-sub">收藏后可在图库顶部一键再画一张</span>
           </div>
         </template>
       </n-drawer-content>
@@ -501,6 +677,56 @@ onMounted(() => {
 
 .spacer {
   flex: 1;
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.presets {
+  padding: 12px 14px;
+}
+
+.preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preset-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 10px;
+  border: 1px dashed var(--mp-line-strong);
+  background: var(--mp-panel-soft);
+  font-size: 12px;
+}
+
+.preset-item .pname {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.score {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: rgba(63, 157, 118, 0.14);
+  color: var(--mp-ok, #3f9d76);
+  font-variant-numeric: tabular-nums;
+}
+
+.score.low {
+  background: rgba(217, 96, 95, 0.14);
+  color: var(--mp-err);
 }
 
 .auto-tag {

@@ -110,6 +110,42 @@
         "default": "",
         "hint": "追加到三套内置系统提示词的规则段，输出契约始终保留；想加「画什么、别画什么」写这里最省事"
       },
+      "negative_base_en": {
+        "description": "负面基线（英文线）",
+        "type": "text",
+        "default": "worst quality, low quality, lowres, jpeg artifacts, blurry, watermark, signature, text, username, bad anatomy, bad hands, extra fingers, fewer fingers, deformed, cropped",
+        "hint": "永远垫在 negative 最前，LLM 给空串时也有质量兜底。danbooru 与 natural_en 都吃这一条；留空 = 不加"
+      },
+      "negative_base_zh": {
+        "description": "负面基线（中文线）",
+        "type": "text",
+        "default": "低画质，模糊，噪点，水印，签名，文字，畸形，多余的手指，残缺的手指，结构崩坏，裁切不当",
+        "hint": "Qwen 等中文自然语言风格用的负面基线；留空 = 不加"
+      },
+      "quality_extra": {
+        "description": "追加质量词",
+        "type": "string",
+        "default": "",
+        "hint": "追加在自动质量词后面（仅 danbooru 风格），如「detailed eyes, cinematic lighting」；自动质量词已有 masterpiece/best quality，不用重复写"
+      },
+      "banned_tags": {
+        "description": "禁词（从正向剔除）",
+        "type": "string",
+        "default": "",
+        "hint": "逗号分隔。命中的标签会从正向提示词里删掉，并自动写进负向——只删不加等于没管住。仅 danbooru 风格生效"
+      },
+      "strip_artists": {
+        "description": "剔除画师名",
+        "type": "bool",
+        "default": true,
+        "hint": "danbooru 风格下删除「artist:xxx」「by xxx」这类标签（模型常违反「不写画师」的规则）"
+      },
+      "max_tags": {
+        "description": "正向标签上限",
+        "type": "int",
+        "default": 75,
+        "hint": "仅 danbooru 风格。SD1.5 的 CLIP 只有 77 token，超出部分完全不生效；超限时按「主体/外观优先」截断。0 = 不限"
+      },
       "style_anchor_enabled": {
         "description": "启用画风硬锚定",
         "type": "bool",
@@ -324,6 +360,25 @@
         "default": "sdxl",
         "hint": "横/竖/方分辨率白名单（sdxl 1216x832 / flux 1344x768 / sd15 768x512 / qwen 1664x928）"
       },
+      "params_preset": {
+        "description": "采样参数档",
+        "type": "string",
+        "options": ["keep", "fast", "standard", "high"],
+        "default": "keep",
+        "hint": "keep = 沿用工作流 JSON 里的步数/CFG（默认，什么都不改）；fast=20 步 CFG5、standard=28 步 CFG6、high=36 步 CFG6.5。只在采样器节点真有该字段时才写入"
+      },
+      "sampler_name": {
+        "description": "采样器覆盖（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "如 euler / euler_ancestral / dpmpp_2m；留空 = 沿用工作流。写错名字会让 ComfyUI 直接拒绝任务"
+      },
+      "scheduler": {
+        "description": "调度器覆盖（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "如 normal / karras / exponential；留空 = 沿用工作流"
+      },
       "default_negative": {
         "description": "默认负面词",
         "type": "string",
@@ -455,6 +510,112 @@
         "type": "int",
         "default": 1024,
         "hint": "超过按最旧优先淘汰非收藏图（图库里的收藏永不淘汰），0 = 不淘汰"
+      }
+    },
+    "default": {}
+  },
+  "quality_guard": {
+    "description": "成图自检（画质闸门）",
+    "type": "object",
+    "hint": "出图后用视觉模型打分：不合格就换种子重画，连拍多张时只投递分数最高的那张。需要一个支持图片输入的对话模型；关掉则完全不评分、连拍强制为 1",
+    "items": {
+      "enabled": {
+        "description": "启用成图自检",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后每张图会多一次多模态调用（约 3~15 秒、按模型计费）。定时出图建议开启；手动「画一张」也会走，追求速度可关"
+      },
+      "provider_id": {
+        "description": "质检用的模型",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 跟「提示词模型」用同一个。必须是支持图片输入的模型（视觉模型/多模态），否则会自动跳过质检"
+      },
+      "min_score": {
+        "description": "合格分数线（0~100）",
+        "type": "int",
+        "default": 60,
+        "hint": "低于这个分数才会重画。60 = 只挡崩坏与明显不符；想更挑剔就调高（75 以上会经常重画，注意 GPU 消耗）"
+      },
+      "retry": {
+        "description": "低分重画次数",
+        "type": "int",
+        "default": 1,
+        "hint": "同一提示词换种子最多重画几次（0~3）。每次都是一张真实出图，注意队列与耗时"
+      },
+      "shots": {
+        "description": "连拍张数",
+        "type": "int",
+        "default": 1,
+        "hint": "1~4。>1 时用同一份提示词换种子连拍，只投递分数最高的那张，其余留在图库。这是提高「一张能看」概率最直接的办法，但一样吃 GPU"
+      },
+      "timeout": {
+        "description": "质检超时（秒）",
+        "type": "int",
+        "default": 45,
+        "hint": "单次打分调用的超时；超时按「跳过质检」处理，不影响出图"
+      }
+    },
+    "default": {}
+  },
+  "refine": {
+    "description": "精修 pass（放大 + 重绘）",
+    "type": "object",
+    "hint": "出图后再走一遍「放大 1.5× + 低 denoise 重绘」，能明显改善细节与手部。用插件内置的一份标准工作流（独立检查点加载器 + KSampler），不碰你自己的模板；必须先填检查点文件名，否则自动跳过",
+    "items": {
+      "enabled": {
+        "description": "启用精修",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后每张图多一次提交（要重新加载模型，多几秒到几十秒）。精修失败会自动用原图，不会让整轮失败"
+      },
+      "ckpt_name": {
+        "description": "精修用的检查点",
+        "type": "string",
+        "default": "",
+        "hint": "ComfyUI 的 checkpoints 目录里的文件名（含子目录时用 / 分隔），如 anima_official_v1.safetensors。留空 = 不精修"
+      },
+      "scale": {
+        "description": "放大倍数",
+        "type": "float",
+        "default": 1.5,
+        "hint": "1.0~2.0。1.5 是性价比档；2.0 显存占用明显上升，SDXL 1024 图不建议超过 1.5"
+      },
+      "denoise": {
+        "description": "重绘强度",
+        "type": "float",
+        "default": 0.35,
+        "hint": "0.2~0.5。太低只做锐化，太高会改构图/换脸。修手部细节常用 0.35~0.45"
+      },
+      "steps": {
+        "description": "精修步数",
+        "type": "int",
+        "default": 20,
+        "hint": "低 denoise 不需要很多步，20 步足够；调高只增加耗时"
+      },
+      "cfg": {
+        "description": "精修 CFG",
+        "type": "float",
+        "default": 5.0,
+        "hint": "低 denoise 时 CFG 太高容易过饱和，5.0 左右比较稳"
+      },
+      "sampler_name": {
+        "description": "精修采样器",
+        "type": "string",
+        "default": "euler",
+        "hint": "ComfyUI 采样器名，如 euler / euler_ancestral / dpmpp_2m"
+      },
+      "scheduler": {
+        "description": "精修调度器",
+        "type": "string",
+        "default": "normal",
+        "hint": "如 normal / karras / exponential"
+      },
+      "timeout": {
+        "description": "精修等待上限（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "包含重新加载模型与排队的时间；超时按「用原图」处理"
       }
     },
     "default": {}
