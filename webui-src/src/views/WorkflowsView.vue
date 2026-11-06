@@ -32,6 +32,7 @@ interface TmplRow {
   file: string;
   tag_style: string;
   size_preset: string;
+  prompt_profile: string;
   default_negative: string;
   enabled: boolean;
   positive_node: string;
@@ -43,6 +44,10 @@ interface TmplRow {
   problem?: string;
   nodes?: Record<string, any>;
   warnings?: string[];
+  profile?: Record<string, any>;
+  quality_prefix?: string;
+  eff_style?: string;
+  eff_preset?: string;
 }
 
 const rows = ref<TmplRow[]>([]);
@@ -63,6 +68,10 @@ const animaPreset = computed({
   get: () => String(cfgGet("anima.size_preset", "follow")),
   set: (v: string) => cfgSet("anima.size_preset", v),
 });
+const animaProfile = computed({
+  get: () => String(cfgGet("anima.prompt_profile", "auto")),
+  set: (v: string) => cfgSet("anima.prompt_profile", v),
+});
 const selectionMode = computed({
   get: () => String(cfgGet("workflow_selection", "random")),
   set: (v: string) => cfgSet("workflow_selection", v),
@@ -74,13 +83,19 @@ const modeOptions = [
 ];
 const styleOptions = [
   { label: "danbooru（动漫英文标签）", value: "danbooru" },
-  { label: "natural（写实中文自然语言）", value: "natural" },
+  { label: "natural（中文自然语言 · Qwen）", value: "natural" },
+  { label: "natural_en（英文自然语言 · Flux/写实）", value: "natural_en" },
+];
+const profileOptions = [
+  { label: "自动（按底模判断）", value: "auto" },
+  ...styleOptions,
 ];
 const presetOptions = [
   { label: "跟随工作流（用 latent 默认尺寸）", value: "follow" },
   { label: "sdxl · 1216×832 / 832×1216 / 1024²", value: "sdxl" },
   { label: "flux · 1344×768 / 768×1344 / 1024²", value: "flux" },
   { label: "sd15 · 768×512 / 512×768 / 512²", value: "sd15" },
+  { label: "qwen · 1664×928 / 928×1664 / 1328²", value: "qwen" },
 ];
 const localPresetOptions = presetOptions.filter((o) => o.value !== "follow");
 
@@ -89,6 +104,7 @@ const jsonText = ref("");
 const upName = ref("");
 const upStyle = ref("danbooru");
 const upPreset = ref("sdxl");
+const upProfile = ref("auto");
 const upNegative = ref("");
 const preview = ref<WorkflowAnalyze | null>(null);
 const parsing = ref(false);
@@ -113,6 +129,7 @@ function normalizeRow(r: any): TmplRow {
     file: String(r?.file || ""),
     tag_style: String(r?.tag_style || "danbooru"),
     size_preset: String(r?.size_preset || "sdxl"),
+    prompt_profile: String(r?.prompt_profile || "auto"),
     default_negative: String(r?.default_negative || ""),
     enabled: r?.enabled !== false,
     positive_node: String(r?.positive_node || ""),
@@ -141,6 +158,10 @@ function mergeValidation(templates: TemplatePublic[]) {
       r.problem = t.problem;
       r.nodes = t.nodes;
       r.warnings = t.warnings || [];
+      r.profile = (t as any).profile || {};
+      r.quality_prefix = (t as any).quality_prefix || "";
+      r.eff_style = t.tag_style;
+      r.eff_preset = t.size_preset;
     }
   }
 }
@@ -176,7 +197,13 @@ async function refreshAnima() {
 
 async function saveSource() {
   const r = await saveFields(
-    ["workflow_source", "workflow_selection", "anima.workflow", "anima.size_preset"],
+    [
+      "workflow_source",
+      "workflow_selection",
+      "anima.workflow",
+      "anima.size_preset",
+      "anima.prompt_profile",
+    ],
     "工作流来源",
   );
   if (!r.ok) {
@@ -221,6 +248,7 @@ async function save() {
     file: r.file.trim(),
     tag_style: r.tag_style,
     size_preset: r.size_preset,
+    prompt_profile: r.prompt_profile,
     default_negative: r.default_negative,
     enabled: r.enabled,
     positive_node: r.positive_node.trim(),
@@ -307,6 +335,7 @@ async function doUpload() {
       json_text: jsonText.value,
       tag_style: upStyle.value,
       size_preset: upPreset.value,
+      prompt_profile: upProfile.value,
       default_negative: upNegative.value,
       enabled: true,
     });
@@ -330,6 +359,17 @@ function nodeHint(r: TmplRow): string {
   bits.push(`正/负 ${n.positive || "?"}/${n.negative || "?"}`);
   bits.push(`尺寸 ${n.latent || "?"}${n.default_width ? `（${n.default_width}×${n.default_height}）` : ""}`);
   bits.push(`seed ${n.seed_nodes ?? 0} 处`);
+  return bits.join(" · ");
+}
+
+/** 生效的提示词/尺寸（auto 时可能与模板里手填的不同）。 */
+function effHint(r: TmplRow): string {
+  const p = r.profile || {};
+  const bits: string[] = [];
+  if (p.label) bits.push(`底模画像 ${p.label}`);
+  bits.push(`提示词 ${r.eff_style || r.tag_style}`);
+  bits.push(`尺寸 ${r.eff_preset || r.size_preset}`);
+  if (r.quality_prefix) bits.push("自动加质量词");
   return bits.join(" · ");
 }
 
@@ -397,6 +437,11 @@ onMounted(reloadAll);
             <span class="label">尺寸策略</span>
             <n-select v-model:value="animaPreset" :options="presetOptions" size="small" />
             <span class="mp-sub">follow = 直接用各自基础工作流 latent 的宽高</span>
+          </label>
+          <label class="mp-field">
+            <span class="label">提示词适配</span>
+            <n-select v-model:value="animaProfile" :options="profileOptions" size="small" />
+            <span class="mp-sub">自动 = 萌绘底模库判定优先，其次看底模文件名</span>
           </label>
         </div>
         <div class="mp-row" style="margin-top: 10px">
@@ -474,8 +519,17 @@ onMounted(reloadAll);
           <n-input v-model:value="upName" size="small" placeholder="如 anima 动漫 / 写实 SDXL" />
         </label>
         <label class="mp-field">
-          <span class="label">标签风格</span>
-          <n-select v-model:value="upStyle" :options="styleOptions" size="small" />
+          <span class="label">标签风格（兜底）</span>
+          <n-select
+            v-model:value="upStyle"
+            :options="styleOptions"
+            size="small"
+            :disabled="upProfile === 'auto'"
+          />
+        </label>
+        <label class="mp-field">
+          <span class="label">提示词适配</span>
+          <n-select v-model:value="upProfile" :options="profileOptions" size="small" />
         </label>
         <label class="mp-field">
           <span class="label">尺寸预设</span>
@@ -555,7 +609,10 @@ onMounted(reloadAll);
         </div>
 
         <div v-if="r.ok === false" class="mp-err" style="margin-bottom: 8px">{{ r.problem }}</div>
-        <div v-else class="node-line mp-mono">{{ nodeHint(r) }}</div>
+        <template v-else>
+          <div class="node-line mp-mono">{{ nodeHint(r) }}</div>
+          <div class="node-line eff">生效：{{ effHint(r) }}</div>
+        </template>
         <div v-for="w in r.warnings || []" :key="w" class="mp-sub warnline">· {{ w }}</div>
 
         <div class="mp-fields">
@@ -568,12 +625,23 @@ onMounted(reloadAll);
             <n-input v-model:value="r.file" size="small" placeholder="anima_t2i.json" />
           </label>
           <label class="mp-field">
-            <span class="label">标签风格</span>
-            <n-select v-model:value="r.tag_style" :options="styleOptions" size="small" />
+            <span class="label">标签风格（兜底）</span>
+            <n-select
+              v-model:value="r.tag_style"
+              :options="styleOptions"
+              size="small"
+              :disabled="r.prompt_profile === 'auto'"
+            />
+          </label>
+          <label class="mp-field">
+            <span class="label">提示词适配</span>
+            <n-select v-model:value="r.prompt_profile" :options="profileOptions" size="small" />
+            <span class="mp-sub">自动 = 按底模文件名判断风格与尺寸</span>
           </label>
           <label class="mp-field">
             <span class="label">尺寸预设</span>
             <n-select v-model:value="r.size_preset" :options="localPresetOptions" size="small" />
+            <span class="mp-sub">自动识别到底模时会被覆盖</span>
           </label>
           <label class="mp-field mp-field--wide">
             <span class="label">默认负面词</span>
@@ -801,6 +869,11 @@ onMounted(reloadAll);
   color: var(--mp-sub);
   margin-bottom: 10px;
   word-break: break-all;
+}
+
+.node-line.eff {
+  color: var(--mp-accent);
+  margin-top: -6px;
 }
 
 .warnline {

@@ -51,7 +51,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.4.1",
+    "v0.5.0",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -441,12 +441,24 @@ class MoePaintPlugin(Star):
             sizes = workflow_mgr.follow_sizes(info.get("default_width"), info.get("default_height"))
         else:
             sizes = prompter.SIZE_PRESETS.get(preset, prompter.SIZE_PRESETS["sdxl"])
-        tag_style = "danbooru"
-        try:
-            if wf_ctx.get("is_anima") is False:
-                tag_style = "natural"
-        except Exception:
-            pass
+
+        # 提示词适配：优先按底模文件名识别；文件名认不出再看萌绘底模库的 is_anima 判定
+        mode = str(acfg.get("prompt_profile") or "auto").strip() or "auto"
+        profile = workflow_mgr.guess_profile(info.get("model_file", ""), info.get("model_class", ""))
+        if profile.get("family") == "unknown":
+            try:
+                is_anima = wf_ctx.get("is_anima")
+            except Exception:
+                is_anima = None
+            if is_anima is True:
+                profile = workflow_mgr.profile_for_family("anime")
+            elif is_anima is False:
+                profile = workflow_mgr.profile_for_family("photoreal")
+        if mode == "auto":
+            tag_style = str(profile.get("tag_style") or "danbooru")
+        else:
+            tag_style = mode
+        quality = str(profile.get("quality_prefix") or "") if tag_style == "danbooru" else ""
         return workflow_mgr.Template(
             name=name,
             file=f"anima:{bid or '?'}",
@@ -460,6 +472,9 @@ class MoePaintPlugin(Star):
             problem="；".join(info.get("problems") or []),
             sizes=sizes,
             source="anima",
+            prompt_profile=mode,
+            profile=profile,
+            quality_prefix=quality,
         )
 
     # ------------------------------------------------------------------ #
@@ -610,6 +625,10 @@ class MoePaintPlugin(Star):
             )
             payload = prompter.parse_llm_payload(text)
         payload["_raw"] = text[:4000]
+        # danbooru 系补质量词（系统提示里承诺「由系统添加」，这里真正落地）
+        payload["prompt"] = prompter.apply_quality_prefix(
+            payload.get("prompt", ""), getattr(tpl, "quality_prefix", "")
+        )
         return payload, label, (time.monotonic() - t0) * 1000
 
     async def debug_llm(self, theme: str = "") -> dict:
@@ -758,6 +777,7 @@ class MoePaintPlugin(Star):
         size_preset: str = "sdxl",
         default_negative: str = "",
         enabled: bool = True,
+        prompt_profile: str = "auto",
     ) -> dict:
         """上传入库：解析 → 落盘 workflows/<名>.json → 更新清单 → 重载。"""
         name = str(name or "").strip()[:60]
@@ -782,6 +802,7 @@ class MoePaintPlugin(Star):
             "file": fname,
             "tag_style": str(tag_style or "danbooru"),
             "size_preset": str(size_preset or "sdxl"),
+            "prompt_profile": str(prompt_profile or "auto"),
             "default_negative": str(default_negative or "").strip(),
             "enabled": bool(enabled),
         }

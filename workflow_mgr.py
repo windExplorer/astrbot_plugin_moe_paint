@@ -29,6 +29,86 @@ BUILTIN_WORKFLOW_FILE = "anima_t2i.json"
 _POS_FIELD_CANDIDATES = ("text", "prompt", "positive", "positive_prompt", "caption")
 _NEG_FIELD_CANDIDATES = ("text", "prompt", "negative", "negative_prompt")
 
+# --------------------------------------------------------------------------- #
+# 底模画像（v0.5.0）：提示词风格 / 尺寸白名单 / 质量前缀按底模家族自动适配
+#
+# 为什么需要：不同底模吃的提示词完全不同 —— 动漫标签系（anima/Illustrious/Pony）
+# 要 danbooru 标签串 + 质量词；Flux / SD3 / 写实 SDXL 要英文自然语言且不需要
+# masterpiece 这类词；Qwen-Image 这类中文模型用中文描述效果最好。
+# 识别只做「文件名关键词 → 家族」，识别不到就保持模板里的手填值（不瞎猜）。
+# --------------------------------------------------------------------------- #
+
+_FAMILY_RULES: tuple = (
+    ("anime", (
+        "anima", "illustrious", "noob", "pony", "animagine", "anything",
+        "counterfeit", "meina", "hassaku", "aam", "pastel", "flat2d",
+        "anime", "waifu",
+    )),
+    ("flux", ("flux", "schnell", "kontext")),
+    ("qwen", ("qwen",)),
+    ("sd3", ("sd3", "sd_3", "stable-diffusion-3")),
+    ("photoreal", (
+        "realvis", "juggernaut", "epicrealis", "realistic", "absolute",
+        "chillout", "majicmix", "cyberrealistic", "mrunsharp", "sdxl-refiner",
+    )),
+)
+
+_PROFILE_BY_FAMILY: dict = {
+    "anime": {
+        "label": "动漫标签系", "tag_style": "danbooru", "size_preset": "",
+        "quality_prefix": "masterpiece, best quality, very aesthetic, absurdres",
+    },
+    "flux": {
+        "label": "Flux", "tag_style": "natural_en", "size_preset": "flux",
+        "quality_prefix": "",
+    },
+    "qwen": {
+        "label": "Qwen-Image（中文）", "tag_style": "natural_zh", "size_preset": "qwen",
+        "quality_prefix": "",
+    },
+    "sd3": {
+        "label": "SD3.x", "tag_style": "natural_en", "size_preset": "sdxl",
+        "quality_prefix": "",
+    },
+    "photoreal": {
+        "label": "写实底模", "tag_style": "natural_en", "size_preset": "sdxl",
+        "quality_prefix": "",
+    },
+    "unknown": {
+        "label": "未识别", "tag_style": "", "size_preset": "", "quality_prefix": "",
+    },
+}
+
+
+def family_of(model_file: str) -> str:
+    """底模文件名 → 家族（anime / flux / qwen / sd3 / photoreal / unknown）。"""
+    name = str(model_file or "").lower()
+    if not name:
+        return "unknown"
+    for family, keys in _FAMILY_RULES:
+        if any(k in name for k in keys):
+            return family
+    return "unknown"
+
+
+def profile_for_family(family: str) -> dict:
+    """按家族取画像（外部在「文件名认不出、但其它线索知道家族」时用）。"""
+    fam = str(family or "unknown")
+    out = dict(_PROFILE_BY_FAMILY.get(fam, _PROFILE_BY_FAMILY["unknown"]))
+    out["family"] = fam if fam in _PROFILE_BY_FAMILY else "unknown"
+    out["model_file"] = ""
+    out["model_class"] = ""
+    return out
+
+
+def guess_profile(model_file: str, model_class: str = "") -> dict:
+    """按底模猜提示词画像；model_class 仅用于展示（例如 UNETLoader / CheckpointLoader）。"""
+    family = family_of(model_file)
+    out = profile_for_family(family)
+    out["model_file"] = str(model_file or "")
+    out["model_class"] = str(model_class or "")
+    return out
+
 
 def _ref_target(ref) -> str:
     """ComfyUI 节点引用（如 ["3", 0]）→ 目标节点 id 字符串；非引用返回 ""。"""
@@ -59,6 +139,9 @@ class Template:
     problem: str = ""
     sizes: dict = field(default_factory=dict)
     source: str = "local"  # local = 本插件库；anima = 跟随萌绘工作流
+    prompt_profile: str = "auto"  # auto / danbooru / natural / natural_en
+    profile: dict = field(default_factory=dict)  # guess_profile 结果
+    quality_prefix: str = ""  # danbooru 系自动加的质量词（其余为空）
 
     def to_public(self) -> dict:
         """给 WebUI / 指令展示的公开形状（不含工作流 JSON 本体）。"""
@@ -68,6 +151,9 @@ class Template:
             "source": self.source,
             "tag_style": self.tag_style,
             "size_preset": self.size_preset,
+            "prompt_profile": self.prompt_profile,
+            "profile": self.profile,
+            "quality_prefix": self.quality_prefix,
             "default_negative": self.default_negative,
             "enabled": self.enabled,
             "ok": self.ok,
@@ -405,11 +491,34 @@ def load_templates(
         }
         override = {k: str(v).strip() for k, v in override.items() if v}
         info = analyze(wf, override)
+        mode = str(entry.get("prompt_profile") or "auto").strip() or "auto"
+        manual_style = str(entry.get("tag_style") or "danbooru").strip() or "danbooru"
         preset = str(entry.get("size_preset") or "sdxl").strip() or "sdxl"
+        profile = guess_profile(info.get("model_file", ""), info.get("model_class", ""))
+        tag_style = manual_style
+        if mode == "auto":
+            # 识别到家族才改；识别不到保持手填值（不瞎猜）
+            if profile.get("tag_style"):
+                tag_style = profile["tag_style"]
+            if profile.get("size_preset"):
+                preset = profile["size_preset"]
+            if profile.get("family") != "unknown" and (tag_style != manual_style or preset != str(
+                entry.get("size_preset") or "sdxl"
+            ).strip()):
+                info.setdefault("warnings", []).append(
+                    f"底模适配：{profile['label']} → 提示词 {tag_style} / 尺寸 {preset}"
+                    f"（模板里原填 {manual_style}/{entry.get('size_preset') or 'sdxl'}）"
+                )
+        else:
+            tag_style = mode
+        quality = (
+            str(profile.get("quality_prefix") or "masterpiece, best quality, very aesthetic, absurdres")
+            if tag_style == "danbooru" else ""
+        )
         tpl = Template(
             name=name,
             file=fname,
-            tag_style=str(entry.get("tag_style") or "danbooru").strip() or "danbooru",
+            tag_style=tag_style,
             size_preset=preset,
             default_negative=str(entry.get("default_negative") or "").strip(),
             enabled=bool(entry.get("enabled", True)),
@@ -418,6 +527,9 @@ def load_templates(
             ok=not info.get("problems"),
             problem="；".join(info.get("problems") or []),
             sizes=prompter.SIZE_PRESETS.get(preset, prompter.SIZE_PRESETS["sdxl"]),
+            prompt_profile=mode,
+            profile=profile,
+            quality_prefix=quality,
         )
         out.append(tpl)
     return out

@@ -102,9 +102,27 @@ SIZE_PRESETS: dict[str, dict[str, list[list[int]]]] = {
         "portrait": [[512, 768], [512, 912]],
         "square": [[512, 512]],
     },
+    # Qwen-Image 原生分辨率（1328² / 1664×928），16 对齐
+    "qwen": {
+        "landscape": [[1664, 928], [1328, 928]],
+        "portrait": [[928, 1664], [928, 1328]],
+        "square": [[1328, 1328]],
+    },
 }
 
 QUALITY_PREFIX_DANBOORU = "masterpiece, best quality, very aesthetic, absurdres"
+
+
+def apply_quality_prefix(prompt: str, prefix: str) -> str:
+    """把质量词拼到提示词最前；已含质量词则不重复（模型自己写了就尊重它）。"""
+    text = str(prompt or "").strip()
+    pre = str(prefix or "").strip()
+    if not text or not pre:
+        return text
+    low = text.lower()
+    if "masterpiece" in low or "best quality" in low:
+        return text
+    return f"{pre}, {text}"
 
 # --------------------------------------------------------------------------- #
 # 抽签
@@ -204,15 +222,34 @@ _SYSTEM_COMMON_TAIL = """
 
 
 def build_system_prompt(tag_style: str) -> str:
-    if tag_style == "natural":
+    """按提示词风格给系统提示：danbooru=英文标签，natural/natural_zh=中文自然语言，
+    natural_en=英文自然语言（Flux / SD3 / 写实类底模）。"""
+    if tag_style in ("natural", "natural_zh"):
         return (
-            "你是一位顶级 AI 绘画提示词工程师，为写实/自然语言模型写文生图提示词。\n"
+            "你是一位顶级 AI 绘画提示词工程师，为支持中文的模型（如 Qwen-Image）写文生图提示词。\n"
             "用户会给你一份「创作简报」，请把它写成高质量的中文画面描述。\n"
             "【prompt 要求】2~4 句连贯中文：主体与细节 → 环境与背景 → 镜头与构图 → "
             "光线与氛围。严格贴合简报的题材/风格/构图/光色/氛围，不要偏题，"
             "不要写成标签堆砌，总长 80~200 字。\n"
-            "【negative 要求】中文，只写写实摄影常见缺陷（如：模糊，畸形，多余的手指，"
+            "【negative 要求】中文，只写常见缺陷（如：模糊，畸形，多余的手指，"
             "低画质，水印），不确定就空串。\n" + _SYSTEM_COMMON_TAIL
+        )
+    if tag_style == "natural_en":
+        return (
+            "You are a top-tier prompt engineer writing text-to-image prompts for "
+            "natural-language models (Flux / SD3 / photorealistic SDXL checkpoints).\n"
+            "The user gives you a Chinese creative brief. Turn it into a high-quality "
+            "English prompt.\n"
+            "【prompt】2-4 flowing English sentences: subject and details -> environment "
+            "and background -> camera and composition -> lighting and mood. Follow the "
+            "brief's subject/style/composition/light/mood exactly; do not drift into a "
+            "generic portrait; no tag dumps, no artist names, 60-150 words.\n"
+            "【negative】English, short, only common defects (blurry, deformed, extra "
+            "fingers, low quality, watermark); empty string if unsure.\n"
+            "【caption】Remains Chinese, 20-40 characters, evocative, no tag lists.\n"
+            "【output】A single JSON object, no prose, no code fence:\n"
+            '{"prompt": "...", "negative": "...", "caption": "..."}\n'
+            "Any character outside that JSON object is a failure.\n"
         )
     return (
         "你是一位顶级 AI 绘画提示词工程师，为动漫风格模型（Danbooru 标签系）写文生图提示词。\n"

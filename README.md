@@ -19,6 +19,7 @@
 | 工作流轮换 | 多份 ComfyUI API 格式工作流，随机或按顺序轮换；节点定位自动完成，异形链路可手工覆盖 |
 | 工作流上传解析 | 在控制台**拖拽 / 选择 / 粘贴** JSON，上传即解析（正负向、尺寸、seed、保存节点、底模），解析不过直接拒绝入库 |
 | 用萌绘的工作流 | 一键把工作流来源切成「跟随萌绘」，直接用萌绘里配好的工作流（含它设的采样器/放大/保存覆盖），不必两边各维护一份 |
+| 提示词按底模适配 | 自动识别底模家族（Anima / Flux / Qwen / SD3 / 写实…），决定用英文标签、中文还是英文自然语言，顺带切尺寸档与质量词；识别不到才用你填的值 |
 | 静默投递 | 生成完直接发到白名单会话（`StarTools.send_message`，不走事件管线，不触发其他插件） |
 | 生成记录图库 | 每轮（含失败）全量落库；图片按 sha256 内容寻址归档，容量超限按最旧淘汰，收藏永不淘汰 |
 | 控制台 WebUI | 总览 / 图库 / 调度 / 投递 / 生成服务 / 工作流 / 主题词池 / 关联萌绘 / 调试，九个页面 |
@@ -148,10 +149,11 @@
 | `anima.follow_server` | `false` | 跟随萌绘的 ComfyUI 服务器地址 |
 | `anima.server_key` | 空 | 指定萌绘的哪台服务器；空 = 萌绘当前启用的那台 |
 | `anima.workflow` | 空 | 跟随萌绘时**参与轮换**的工作流（名称或 id，多个逗号分隔）；空 = 萌绘里所有可用的新版工作流 |
-| `anima.size_preset` | `follow` | `follow` 跟随基础工作流 latent 尺寸；`sdxl`/`flux`/`sd15` 走白名单 |
+| `anima.size_preset` | `follow` | `follow` 跟随基础工作流 latent 尺寸；`sdxl`/`flux`/`sd15`/`qwen` 走白名单 |
+| `anima.prompt_profile` | `auto` | 跟随萌绘时的提示词适配：`auto` / `danbooru` / `natural` / `natural_en` |
 | `workflow_source` | `local` | `local` 本插件工作流库 / `anima` 跟随萌绘的工作流 |
 | `workflow_selection` | `random` | `random` 随机 / `round_robin` 顺序轮换 |
-| `workflow_templates` | 内置一个 | 模板清单（名称 / 文件 / 标签风格 / 尺寸预设 / 默认负面词 / 启用 / 节点覆盖） |
+| `workflow_templates` | 内置一个 | 模板清单（名称 / 文件 / **提示词适配 prompt_profile** / 标签风格兜底 / 尺寸预设 / 默认负面词 / 启用 / 节点覆盖） |
 | `theme.disabled_categories` | 空 | 停用的类别名（逗号分隔） |
 | `theme.extra_words` | 空 | 词池扩充：`类别=词1,词2`，或 `风格/光色/氛围/构图` |
 | `delivery.sessions` | `[]` | 投递会话 UMO 列表；**空 = 只入库不投递** |
@@ -177,10 +179,32 @@ ComfyUI 任务 id、耗时、错误原因、投递结果、收藏标记。
 
 ---
 
+## 七·五、提示词如何适配底模
+
+不同底模吃的东西完全不一样，插件默认**按工作流里的底模文件名自动判断**（模板里 `prompt_profile = auto`）：
+
+| 底模家族 | 识别关键词（文件名，小写包含） | 提示词风格 | 尺寸 | 质量词 |
+| --- | --- | --- | --- | --- |
+| 动漫标签系 | anima / illustrious / noob / pony / animagine / anything / counterfeit / hassaku … | `danbooru` 英文标签 | 沿用模板 | 自动加 `masterpiece, best quality, very aesthetic, absurdres` |
+| Flux | flux / schnell / kontext | `natural_en` 英文自然语言 | flux（1344×768 等） | 不加 |
+| Qwen-Image | qwen | `natural` 中文自然语言 | qwen（1664×928 / 1328²） | 不加 |
+| SD3.x | sd3 / sd_3 | `natural_en` | sdxl | 不加 |
+| 写实 SDXL | realvis / juggernaut / realistic / chillout / majicmix … | `natural_en` | sdxl | 不加 |
+| 认不出来 | 其它 | **用模板里手填的兜底值** | 手填 | 不加 |
+
+- 想强制某种风格：把模板的「提示词适配」从「自动」改成具体风格即可（此时标签风格下拉才可编辑）。
+- 跟随时萌绘时的优先级：**萌绘底模库的「提示词风格 / danbooru 适配」** → 底模文件名 → 模板兜底；
+  尺寸优先 `follow`（用基础工作流 latent 的宽高）。
+- 自动改动会在模板行显示「生效：底模画像 Flux · 提示词 natural_en · 尺寸 flux」，并与原填写值对照，
+  不会悄悄改你的配置。
+- 质量词只在 danbooru 风格下补，且模型自己写了 `masterpiece`/`best quality` 就不重复。
+
+---
+
 ## 八、提示词工程（为什么不容易「画腻」）
 
 1. **分层抽签**：类别、题材、风格、构图、光色、氛围每层独立随机 → 组成一句「创作简报」。
-2. **LLM 只做转写**：系统提示词按模板的 `tag_style` 切换（`danbooru` 走英文标签串、`natural` 走中文自然语言），要求严格输出 `{"prompt","negative","caption"}`；不合契约会带原因重试一次。
+2. **LLM 只做转写**：系统提示词按模板生效的提示词风格切换（`danbooru` 英文标签串 / `natural` 中文自然语言 / `natural_en` 英文自然语言，见上一节自动适配），要求严格输出 `{"prompt","negative","caption"}`；不合契约会带原因重试一次。
 3. **尺寸不由模型定**：构图层的朝向决定从模板尺寸白名单里取哪一档（超广角/俯瞰/全景取最极端长宽比）。
 4. **可调词池**：控制台「主题词池」可停用整类、追加题材、新增自定义类别、追加风格/光色/氛围/构图。
 

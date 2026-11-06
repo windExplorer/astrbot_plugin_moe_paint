@@ -423,6 +423,7 @@ async def h_workflow_upload(plugin) -> dict:
         size_preset=str(body.get("size_preset") or "sdxl"),
         default_negative=str(body.get("default_negative") or ""),
         enabled=_bool_of(body.get("enabled", True), True),
+        prompt_profile=str(body.get("prompt_profile") or "auto"),
     )
     return ok(res) if res.get("ok") else err(res.get("error") or "入库失败")
 

@@ -1,5 +1,61 @@
 # 更新日志
 
+## v0.5.0（提示词按底模自动适配：三种风格 + 尺寸 + 质量词）
+
+问题：提示词规则此前**只跟一个模板字段 `tag_style` 走**，而这个字段要靠人手工判断 ——
+换了底模（比如从 Anima 换成 Flux）不提醒、不跟随，出图就会出现「给 Flux 喂一堆 danbooru 标签」
+「用 Qwen-Image 却吃英文标签」「给写实底模加 masterpiece, best quality」这类明显偏差；
+另外系统提示里写着「质量词由系统自动添加」，代码其实从没加过。
+
+### 底模画像（自动识别）
+
+- 新增 `workflow_mgr.guess_profile(model_file)`：按工作流里识别出的**底模文件名**归类
+  （`family_of` → anime / flux / qwen / sd3 / photoreal / unknown），给出该家族的：
+  提示词风格、尺寸预设、质量前缀。
+- 识别表（关键词 → 家族 → 生效值）：
+
+  | 家族 | 关键词（小写包含） | 提示词 | 尺寸 | 质量词 |
+  | --- | --- | --- | --- | --- |
+  | anime | anima / illustrious / noob / pony / animagine / anything / counterfeit / meina / hassaku … | danbooru 英文标签 | 保持模板 | 自动加 `masterpiece, best quality, very aesthetic, absurdres` |
+  | flux | flux / schnell / kontext | natural_en 英文自然语言 | flux | 不加 |
+  | qwen | qwen | natural_zh 中文自然语言 | qwen | 不加 |
+  | sd3 | sd3 / sd_3 | natural_en | sdxl | 不加 |
+  | photoreal | realvis / juggernaut / epicrealis / realistic / chillout / majicmix … | natural_en | sdxl | 不加 |
+  | unknown | 其它 | **保持模板手填值**（不瞎猜） | 保持 | 不加 |
+
+- 每个模板新增 `prompt_profile`（`auto` / `danbooru` / `natural` / `natural_en`，默认 `auto`）：
+  `auto` 时才用画像覆盖；显式指定则强制。识别不出家族时一律回退手填值。
+- 「跟随萌绘」时优先级：**萌绘底模库的判定**（`_load_from_base` 注水的 `is_anima`）→ 底模文件名 → 模板兜底；
+  尺寸仍以 `follow`（基础工作流 latent 宽高）优先。
+- `Template` 新增 `profile` / `quality_prefix` / `prompt_profile`，`to_public()` 一并返回；
+  模板清单行会显示「生效：底模画像 Flux · 提示词 natural_en · 尺寸 flux」，与被覆盖的填写值一眼对上。
+
+### 三种提示词风格
+
+- `danbooru`：动漫标签串（原有）。
+- `natural`（= `natural_zh`）：中文自然语言，适合 Qwen-Image 这类中文模型（原有语义保留，旧值不改）。
+- **新增 `natural_en`**：英文自然语言 2~4 句，适合 Flux / SD3 / 写实 SDXL；`caption` 仍要求中文。
+- 质量词真正落地：danbooru 风格出图前自动补质量前缀（已含 `masterpiece`/`best quality` 则不重复），
+  自然语言风格不加 —— 与系统提示里「质量词由系统自动添加」的承诺一致。
+
+### 尺寸
+
+- `SIZE_PRESETS` 新增 `qwen`（1664×928 / 928×1664 / 1328×1328，16 对齐），`size_preset` 选项同步。
+- `auto` 识别到 Flux/Qwen/SD3/写实时自动切到对应尺寸档（Flux 1344×768、Qwen 1664×928、写实 1216×832），
+  避免「Flux 工作流套 1216×832/SDXL 档」这类隐性不匹配；识别不到不动用户的设置。
+
+### 调试可见性
+
+- 「调试与日志 → LLM 试跑」现在展示的是**最终注入值**（含质量词），并显示该模板生效的 `tag_style`；
+  模板行与试跑结果能互相印证。
+
+### 测试
+
+- `tests/test_workflow_mgr.py` 增补 18 条：六个家族的画像判定、空文件名、`load_templates` 的
+  auto 覆盖（Flux 工作流 → natural_en/flux、质量词为空且带提示）、强制 `danbooru` 时不覆盖。
+- `tests/test_prompter.py` 增补 15 条：qwen 尺寸档（含 16 对齐）、三种系统提示（中文/英文/标签）、
+  质量词拼接与去重、qwen 三朝向落值。
+
 ## v0.4.1（跟随萌绘可多工作流轮换，不再只能选一条）
 
 问题：v0.4.0 的「跟随萌绘」只装配了一条工作流（`anima.workflow` 单值），

@@ -144,6 +144,9 @@ export interface TemplatePublic {
   nodes: Record<string, any>;
   warnings?: string[];
   source?: string;
+  prompt_profile?: string;
+  profile?: Record<string, any>;
+  quality_prefix?: string;
 }
 
 export interface AnimaBrief {
@@ -401,6 +404,7 @@ export function apiWorkflowUpload(payload: {
   json_text: string;
   tag_style?: string;
   size_preset?: string;
+  prompt_profile?: string;
   default_negative?: string;
   enabled?: boolean;
 }) {

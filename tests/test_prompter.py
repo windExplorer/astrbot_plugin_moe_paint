@@ -112,5 +112,32 @@ for _ in range(50):
 else:
     check("pick_size_in_whitelist", True)
 
+# ---------- v0.5.0：底模适配（三种提示词风格 / 质量词 / qwen 尺寸） ----------
+check("preset_qwen", prompter.SIZE_PRESETS["qwen"]["square"] == [[1328, 1328]])
+check("preset_qwen_16", all(w % 16 == 0 and h % 16 == 0
+                           for arr in prompter.SIZE_PRESETS["qwen"].values() for w, h in arr))
+
+sys_zh = prompter.build_system_prompt("natural")
+sys_zh2 = prompter.build_system_prompt("natural_zh")
+check("sys_natural_zh", "中文" in sys_zh and sys_zh2 == sys_zh)
+sys_en = prompter.build_system_prompt("natural_en")
+check("sys_natural_en_english", "English prompt" in sys_en and "JSON" in sys_en)
+sys_tags = prompter.build_system_prompt("danbooru")
+check("sys_danbooru_tags", "Danbooru" in sys_tags)
+
+check("quality_prefix_added",
+      prompter.apply_quality_prefix("1girl, night", prompter.QUALITY_PREFIX_DANBOORU)
+      == prompter.QUALITY_PREFIX_DANBOORU + ", 1girl, night")
+check("quality_prefix_no_dup",
+      prompter.apply_quality_prefix("masterpiece, 1girl", prompter.QUALITY_PREFIX_DANBOORU)
+      == "masterpiece, 1girl")
+check("quality_prefix_empty_prefix", prompter.apply_quality_prefix("a scene", "") == "a scene")
+check("quality_prefix_empty_prompt", prompter.apply_quality_prefix("", "masterpiece") == "")
+
+# 尺寸白名单仍可正确落值（qwen 横竖方都能命中）
+for orient in ("landscape", "portrait", "square"):
+    w, h = prompter.pick_size(prompter.SIZE_PRESETS["qwen"], orient, "中景·横幅", random.Random(1))
+    check(f"qwen_pick_{orient}", w % 16 == 0 and h % 16 == 0 and w > 0 and h > 0, f"{w}x{h}")
+
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

@@ -152,9 +152,16 @@
       "size_preset": {
         "description": "萌绘工作流的尺寸策略",
         "type": "string",
-        "options": ["follow", "sdxl", "flux", "sd15"],
+        "options": ["follow", "sdxl", "flux", "sd15", "qwen"],
         "default": "follow",
         "hint": "follow = 跟随基础工作流里 latent 的默认宽高（横竖互换）；其余按预设白名单"
+      },
+      "prompt_profile": {
+        "description": "提示词适配",
+        "type": "string",
+        "options": ["auto", "danbooru", "natural", "natural_en"],
+        "default": "auto",
+        "hint": "auto = 按底模自动（萌绘底模库的「提示词风格/danbooru 适配」优先，其次看底模文件名）；其余为强制指定"
       }
     },
     "default": {}
@@ -191,18 +198,25 @@
         "hint": "data/plugin_data/astrbot_plugin_moe_paint/workflows/ 下的 JSON 文件名（API 格式，ComfyUI「导出 (API)」）；缺 .json 自动补"
       },
       "tag_style": {
-        "description": "标签风格",
+        "description": "标签风格（prompt_profile=auto 时仅作兜底）",
         "type": "string",
-        "options": ["danbooru", "natural"],
+        "options": ["danbooru", "natural", "natural_en"],
         "default": "danbooru",
-        "hint": "danbooru=动漫系英文标签（Anima/Illustrious/NoobAI/Pony）；natural=写实系中文自然语言"
+        "hint": "danbooru=动漫系英文标签；natural=中文自然语言（Qwen-Image 这类）；natural_en=英文自然语言（Flux/SD3/写实 SDXL）"
+      },
+      "prompt_profile": {
+        "description": "提示词适配",
+        "type": "string",
+        "options": ["auto", "danbooru", "natural", "natural_en"],
+        "default": "auto",
+        "hint": "auto=按工作流里的底模文件名自动判断提示词风格与尺寸（认不出才用上面的手填值）；其余为强制指定"
       },
       "size_preset": {
-        "description": "尺寸预设",
+        "description": "尺寸预设（auto 识别到底模时会被覆盖）",
         "type": "string",
-        "options": ["sdxl", "flux", "sd15"],
+        "options": ["sdxl", "flux", "sd15", "qwen"],
         "default": "sdxl",
-        "hint": "横/竖/方分辨率白名单（sdxl: 1216x832 / 832x1216 / 1024x1024 等）"
+        "hint": "横/竖/方分辨率白名单（sdxl 1216x832 / flux 1344x768 / sd15 768x512 / qwen 1664x928）"
       },
       "default_negative": {
         "description": "默认负面词",

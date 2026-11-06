@@ -188,5 +188,63 @@ q3, c3 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), c2)
 check("anima_rr_cycles", [q1.name, q2.name, q3.name] == ["写实", "动漫", "国风"] and c3 == 3,
       f"{q1.name},{q2.name},{q3.name},c={c3}")
 
+# ---------- v0.5.0：底模画像（提示词风格 / 尺寸 / 质量词） ----------
+pf = workflow_mgr.guess_profile("anima-turbo-v1.0.safetensors")
+check("profile_anime_style", pf["tag_style"] == "danbooru", str(pf))
+check("profile_anime_quality", "masterpiece" in pf["quality_prefix"], str(pf))
+check("profile_anime_keep_size", pf["size_preset"] == "", str(pf))
+
+pf = workflow_mgr.guess_profile("flux1-dev-fp8.safetensors")
+check("profile_flux_style", pf["tag_style"] == "natural_en", str(pf))
+check("profile_flux_size", pf["size_preset"] == "flux", str(pf))
+check("profile_flux_no_quality", pf["quality_prefix"] == "", str(pf))
+
+pf = workflow_mgr.guess_profile("qwen_image_vae.safetensors")
+check("profile_qwen_style", pf["tag_style"] == "natural_zh", str(pf))
+check("profile_qwen_size", pf["size_preset"] == "qwen", str(pf))
+
+pf = workflow_mgr.guess_profile("realvisxlV40_v40Bakedvae.safetensors")
+check("profile_photoreal_style", pf["tag_style"] == "natural_en" and pf["size_preset"] == "sdxl", str(pf))
+
+pf = workflow_mgr.guess_profile("mystery-model.safetensors")
+check("profile_unknown_keeps_manual", pf["family"] == "unknown" and pf["tag_style"] == "", str(pf))
+check("profile_empty_file", workflow_mgr.guess_profile("")["family"] == "unknown")
+
+flux_wf = {
+    "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors"}},
+    "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "a"}},
+    "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "b"}},
+    "4": {"class_type": "EmptyLatentImage", "inputs": {"width": 1344, "height": 768}},
+    "5": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["2", 0], "negative": ["3", 0],
+                                               "latent_image": ["4", 0], "model": ["1", 0]}},
+    "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 0]}},
+}
+with tempfile.TemporaryDirectory() as td:
+    wf_dir = Path(td) / "workflows"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    (wf_dir / "flux.json").write_text(json.dumps(flux_wf), encoding="utf-8")
+
+    auto = workflow_mgr.load_templates(
+        wf_dir,
+        [{"name": "flux", "file": "flux.json", "tag_style": "danbooru",
+          "size_preset": "sdxl", "prompt_profile": "auto", "enabled": True}],
+        root() / "builtin",
+    )[0]
+    check("auto_profile_style", auto.tag_style == "natural_en", auto.tag_style)
+    check("auto_profile_size", auto.size_preset == "flux", auto.size_preset)
+    check("auto_profile_quality_empty", auto.quality_prefix == "", auto.quality_prefix)
+    check("auto_profile_warned", any("底模适配" in w for w in auto.info.get("warnings") or []),
+          str(auto.info.get("warnings")))
+
+    forced = workflow_mgr.load_templates(
+        wf_dir,
+        [{"name": "flux", "file": "flux.json", "tag_style": "danbooru",
+          "size_preset": "sdxl", "prompt_profile": "danbooru", "enabled": True}],
+        root() / "builtin",
+    )[0]
+    check("forced_profile_style", forced.tag_style == "danbooru", forced.tag_style)
+    check("forced_profile_size", forced.size_preset == "sdxl", forced.size_preset)
+    check("forced_profile_quality", "masterpiece" in forced.quality_prefix, forced.quality_prefix)
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

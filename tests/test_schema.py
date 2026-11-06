@@ -95,6 +95,7 @@ def main() -> int:
         ("anima", "server_key"),
         ("anima", "workflow"),
         ("anima", "size_preset"),
+        ("anima", "prompt_profile"),
         ("workflow_source",),
         ("delivery", "sessions"),
         ("gallery", "max_total_mb"),

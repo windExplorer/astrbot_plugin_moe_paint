@@ -49,6 +49,7 @@ FRONTEND_KEYS = [
     "schedule.daily_times", "schedule.quiet_enabled", "schedule.quiet_hours",
     "schedule.max_per_day",
     "anima.follow_server", "anima.server_key", "anima.workflow", "anima.size_preset",
+    "anima.prompt_profile",
     "theme.disabled_categories", "theme.extra_words",
     "delivery.sessions", "delivery.caption_on", "delivery.caption_template",
     "gallery.max_total_mb",

@@ -40,6 +40,7 @@ export const KNOWN_KEYS = new Set<string>([
   "anima.server_key",
   "anima.workflow",
   "anima.size_preset",
+  "anima.prompt_profile",
   "workflow_source",
   "workflow_selection",
   "workflow_templates",
