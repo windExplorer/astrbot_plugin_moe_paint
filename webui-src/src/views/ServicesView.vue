@@ -209,6 +209,44 @@ onMounted(loadConfig);
       </div>
     </div>
 
+    <!-- 指令手动出图 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">指令手动出图</div>
+        <n-button
+          size="small"
+          type="primary"
+          :loading="!!saving['手动出图']"
+          @click="save(['manual_draw_admin_only', 'manual_draw_cooldown_sec'], '手动出图')"
+        >
+          保存
+        </n-button>
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">仅管理员可用</span>
+          <n-switch
+            :value="cfgBool('manual_draw_admin_only', true)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('manual_draw_admin_only', v)"
+          />
+          <span class="mp-sub">
+            关掉后任何群成员都能「/绘卷 画一张」——它会独占生成锁，期间到点的定时任务
+            会被顺延一轮。控制台的「立即画一张」不受此限制
+          </span>
+        </label>
+        <label class="mp-field">
+          <span class="label">同会话冷却（秒，0 = 不限）</span>
+          <n-input-number
+            :value="cfgNum('manual_draw_cooldown_sec', 60)"
+            :min="0" :max="3600" size="small"
+            @update:value="(v: number | null) => cfgSet('manual_draw_cooldown_sec', v ?? 60)"
+          />
+          <span class="mp-sub">按会话记账，别人点过不会拦你</span>
+        </label>
+      </div>
+    </div>
+
     <!-- 图库与通知 -->
     <div class="mp-card">
       <div class="mp-card-head">

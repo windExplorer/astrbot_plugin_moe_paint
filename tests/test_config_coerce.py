@@ -27,6 +27,15 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"FAIL  {name} {detail}")
 
 
+# ---------- truthy（v0.7.7：字符串布尔必须当假） ----------
+check("truthy_bool", cc.truthy(True) is True and cc.truthy(False) is False)
+check("truthy_none_default", cc.truthy(None) is True and cc.truthy(None, False) is False)
+check("truthy_str_false", cc.truthy("false") is False and cc.truthy("0") is False)
+check("truthy_str_off", cc.truthy("off") is False and cc.truthy("no") is False)
+check("truthy_str_true", cc.truthy("true") is True and cc.truthy("1") is True)
+check("truthy_blank", cc.truthy("   ") is True and cc.truthy("", False) is False)
+check("truthy_chinese", cc.truthy("开启") is True and cc.truthy("关") is False)
+
 # ---------- resolve_spec ----------
 p, c, spec = cc.resolve_spec(SCHEMA, "enabled")
 check("resolve_top", (p, c) == ("enabled", None) and spec.get("type") == "bool")

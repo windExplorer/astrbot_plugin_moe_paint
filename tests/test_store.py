@@ -102,6 +102,16 @@ async def main() -> None:
         check("archive_path_shape", rel1.startswith("2026-") and rel1.endswith(".png"), rel1)
         check("archive_dedup", dedup1 is False and dedup2 is True and rel1 == rel2)
         check("archive_abs_exists", Path(abs1).is_file())
+
+        # v0.7.7：跨月去重（内容寻址不能每月各存一份）
+        old_dir = gdir / "2020-01"
+        old_dir.mkdir(parents=True, exist_ok=True)
+        old_path = old_dir / Path(rel1).name
+        Path(abs1).replace(old_path)
+        _abs3, rel3, _sha3, dedup3 = gallery_store.archive_image(gdir, data, ".png")
+        check("archive_dedup_across_month", dedup3 is True and rel3 == f"2020-01/{Path(rel1).name}",
+              f"rel3={rel3} dedup={dedup3}")
+        check("archive_no_duplicate_file", not (gdir / rel1).is_file())
         check("ext_for_safe", gallery_store.ext_for("x.exe") == ".png" and gallery_store.ext_for("a.webp") == ".webp")
         check("mime_for", gallery_store.mime_for(".webp") == "image/webp")
 
@@ -151,6 +161,13 @@ async def main() -> None:
         check("prune_removed", freed == 2, f"freed={freed}")
         check("prune_starred_survives", (gdir2 / f1).is_file())
         check("prune_unstarred_gone", not (gdir2 / f2).is_file() and not (gdir2 / f3).is_file())
+        # v0.7.7：淘汰后必须把记录标成「已清理」，否则图库里是永远加载不了的破图
+        rec_b = await store.get_record(rB)
+        rec_a = await store.get_record(rA)
+        check("prune_marks_record", rec_b["pruned"] == 1 and rec_b["image_relpath"] == "",
+              f"pruned={rec_b['pruned']} rel={rec_b['image_relpath']!r}")
+        check("prune_keeps_starred_record", rec_a["pruned"] == 0 and rec_a["image_relpath"] == f1,
+              f"pruned={rec_a['pruned']} rel={rec_a['image_relpath']!r}")
         # cap 0 = 不淘汰
         _a4, f4, _s4, _ = gallery_store.archive_image(gdir2, b"file-4", ".png")
         freed0 = await gallery_store.prune_gallery(gdir2, store, 0)

@@ -233,6 +233,7 @@ onMounted(refreshAll);
               <img v-if="thumbs[r.id]" :src="thumbs[r.id]" alt="" loading="lazy" />
               <div v-else class="ph">
                 <span v-if="r.status === 'failed'">失败</span>
+                <span v-else-if="r.pruned">已清理</span>
                 <span v-else>{{ r.status === "running" ? "生成中…" : "无图" }}</span>
               </div>
               <div class="recent-meta">

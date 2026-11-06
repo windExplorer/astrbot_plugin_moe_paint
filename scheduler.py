@@ -7,6 +7,7 @@
 
 import asyncio
 import random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dtime
 
@@ -25,6 +26,11 @@ DEFER_WAIT_SECONDS = 300
 
 # 单轮生成的总硬超时（秒）：内部各环节都有自己的预算，这层是防「彻底卡死」的兜底
 GEN_TIMEOUT_SECONDS = 1800
+
+# 陈旧「生成中」兜底：多久扫一次 / 超过多久算卡住（必须大于单轮硬超时，
+# 否则会把还在跑的轮次误判成中断）
+SWEEP_INTERVAL_SECONDS = 600
+STALE_SWEEP_SECONDS = GEN_TIMEOUT_SECONDS + 300
 
 # 按「上一张 + 间隔」算出来已经过期时，稍等几秒再跑（避免同一 tick 里空转）
 IMMEDIATE_DELAY_SECONDS = 3
@@ -190,6 +196,25 @@ def initial_due(cfg: dict, now: datetime, rng: random.Random) -> datetime:
     return advance(cfg, now, rng)
 
 
+def skip_next(cfg: dict, base: datetime, now: datetime, rng: random.Random) -> datetime:
+    """跳过本轮之后的下一个计划点，**保证严格晚于 now**。
+
+    为什么需要它：暂停期间 `next_due` 不推进（循环在暂停分支里睡 60 秒就 continue），
+    恢复时那个 due 可能已经是几天前的。原先四个「跳过」分支都是 `advance(cfg, next_due)`，
+    于是会在一瞬间连续 advance 上百次（每次还写一条 info 日志），直到把陈旧时刻追到未来。
+    这里一次性追平：先按原网格 advance，仍在过去就继续 advance，最后一跳保底 +1 分钟。
+    纯算术、无 IO、无日志，配上调用方只写一条日志，就不会刷屏也不会空转。
+    """
+    nxt = advance(cfg, base, rng)
+    guard = 0
+    while nxt <= now and guard < 10000:
+        nxt = advance(cfg, nxt, rng)
+        guard += 1
+    if nxt <= now:  # 间隔被配得过小 / 网格异常：保底别卡在过去
+        nxt = now + timedelta(minutes=1)
+    return nxt
+
+
 def due_from_last(
     cfg: dict, last_at: "datetime | None", now: datetime, rng: random.Random
 ) -> datetime:
@@ -239,16 +264,48 @@ def queue_too_busy(ahead: int, threshold: int) -> bool:
 # 循环壳
 # --------------------------------------------------------------------------- #
 
+async def _sweep_stale(plugin, last_ts: float) -> float:
+    """每隔一段时间收尾「假生成中」记录，返回本次记账时刻。
+
+    为什么循环里也要做：启动时那次收尾（main.initialize）只处理「已经超过 15 分钟」
+    的记录——崩在开画前几分钟的那条会一直挂着；被 `asyncio.wait_for` 取消的轮次
+    同样会留下 running 行。这里做周期性兜底，阈值高于单轮硬超时（GEN_TIMEOUT），
+    且**只在没有真实生成时**动手，绝不误伤正在画的记录。
+    """
+    now_ts = time.time()
+    if now_ts - last_ts < SWEEP_INTERVAL_SECONDS:
+        return last_ts
+    if plugin._gen_lock.locked():
+        return now_ts
+    store = getattr(plugin, "store", None)
+    if store is None:
+        return now_ts
+    try:
+        n = await store.fail_stale_running(STALE_SWEEP_SECONDS)
+        if n:
+            logger.info(
+                f"[萌萌绘卷] 兜底收尾 {n} 条卡住的「生成中」记录"
+                f"（超过 {STALE_SWEEP_SECONDS // 60} 分钟没有任何结果）"
+            )
+            plugin.debug_log("store", f"兜底收尾 {n} 条中断记录")
+    except Exception as e:
+        logger.debug(f"[萌萌绘卷] 陈旧记录兜底失败（忽略本次）: {e}")
+    return now_ts
+
+
 async def run_loop(plugin) -> None:
     """插件自管调度循环。配置每轮现读（管理页改完即时生效）。"""
     state: ScheduleState = plugin.sched
     rng = random.Random()
+    last_sweep = 0.0
     while True:
         try:
             root = plugin._cfg()
             cfg = plugin._schedule_cfg()
-            paused_manual = bool(cfg.get("paused_manual", False))
-            if not root.get("enabled", True) or paused_manual or state.auto_paused:
+            paused_manual = _truthy(cfg.get("paused_manual", False), False)
+            # 兜底收尾放最前：暂停期间也要清，否则那行会一直「生成中」
+            last_sweep = await _sweep_stale(plugin, last_sweep)
+            if not _truthy(root.get("enabled", True), True) or paused_manual or state.auto_paused:
                 await asyncio.sleep(60)
                 continue
             now = datetime.now()
@@ -261,8 +318,8 @@ async def run_loop(plugin) -> None:
             if now >= state.next_due:
                 quiet = quiet_span_of(cfg)
                 if quiet and in_quiet_hours(now.time(), quiet):
-                    # 安静时段到点：跳过本次，顺延下个计划点（从原 due 起算）
-                    state.next_due = advance(cfg, state.next_due, rng)
+                    # 安静时段到点：跳过本次，顺延到下个计划点（一次性追到未来）
+                    state.next_due = skip_next(cfg, state.next_due, now, rng)
                     state.last_run_note = f"安静时段跳过（{cfg.get('quiet_hours')}）"
                     logger.info(
                         f"[萌萌绘卷] 安静时段跳过本次生成，下次计划 "
@@ -271,7 +328,7 @@ async def run_loop(plugin) -> None:
                     continue
                 if plugin._gen_lock.locked():
                     # 上一张还没画完（手动触发/WebUI 触发占着）：顺延，不排队
-                    state.next_due = advance(cfg, state.next_due, rng)
+                    state.next_due = skip_next(cfg, state.next_due, now, rng)
                     state.last_run_note = "上一张仍在生成，本次顺延"
                     continue
                 # 每日上限（max_per_day，0=不限）：只数今天成功的张数；手动
@@ -284,7 +341,7 @@ async def run_loop(plugin) -> None:
                     except Exception as e:
                         logger.warning(f"[萌萌绘卷] 今日张数查询失败（本次不执行上限）: {e}")
                 if cap_reached(cfg.get("max_per_day"), today_n):
-                    state.next_due = advance(cfg, state.next_due, rng)
+                    state.next_due = skip_next(cfg, state.next_due, now, rng)
                     state.last_run_note = (
                         f"已达每日上限（{today_n}/{cfg.get('max_per_day')}），"
                         f"今日不再定时生成，下次计划 "

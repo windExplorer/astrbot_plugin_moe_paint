@@ -56,6 +56,8 @@ export const KNOWN_KEYS = new Set<string>([
   "workflow_source",
   "workflow_selection",
   "rotation_manual_advances",
+  "manual_draw_admin_only",
+  "manual_draw_cooldown_sec",
   "workflow_templates",
   "theme.disabled_categories",
   "theme.extra_words",

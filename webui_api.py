@@ -45,13 +45,8 @@ def _qi(name: str, default: int, lo: int, hi: int) -> int:
         return default
 
 
-def _bool_of(v, default: bool = True) -> bool:
-    """配置布尔容错（"false"/"0"/"off" 视为关闭）。"""
-    if v is None or (isinstance(v, str) and not v.strip()):
-        return default
-    if isinstance(v, bool):
-        return v
-    return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
+# 配置布尔容错统一走 config_coerce.truthy（此前每个模块各抄一份，容易漏用）
+_bool_of = config_coerce.truthy
 
 
 async def _payload() -> dict:
@@ -98,12 +93,14 @@ async def h_status(plugin) -> dict:
     sched = plugin.sched
     tpl_public = []
     try:
-        plugin.reload_templates()
-        tpl_public = [t.to_public() for t in plugin._templates]
+        # v0.7.7：状态接口不再每次重载模板——总览页每 10 秒轮询一次，
+        # 重载要读 JSON/SQLite，跟随萌绘时还会刷「【底模】…」日志。
+        tpl_public = [t.to_public() for t in plugin.templates_for_ui()]
     except Exception as e:
         logger.warning(f"{PLUGIN_TAG} 模板加载失败: {e}")
+    # 探活在 _comfy_status 内部缓存 20 秒，避免轮询把远端 ComfyUI 当靶子
     comfy = await plugin._comfy_status()
-    prov = plugin._provider()
+    prov = await plugin._provider()
     pid_cfg = str(plugin._sub("llm").get("provider_id") or "").strip()
     scfg = plugin._schedule_cfg()
     anima = plugin.anima_info()
@@ -117,8 +114,8 @@ async def h_status(plugin) -> dict:
     if running and sched.running_since is not None:
         last_note = f"正在生成（{sched.running_since.strftime('%H:%M')} 开始，已 {sched.running_for_sec() // 60} 分钟）"
     return ok({
-        "enabled": bool(plugin._cfg().get("enabled", True)),
-        "paused_manual": bool(scfg.get("paused_manual", False)),
+        "enabled": _bool_of(plugin._cfg().get("enabled", True), True),
+        "paused_manual": _bool_of(scfg.get("paused_manual", False), False),
         "auto_paused": bool(sched.auto_paused),
         "consecutive_failures": int(sched.consecutive_failures),
         "next_due": sched.next_due.strftime("%Y-%m-%d %H:%M:%S") if sched.next_due else None,
@@ -293,8 +290,12 @@ def _thumb_data_url(path: Path, size: int) -> str:
         pass  # 没有 Pillow：回退原图 base64（体积大但能用）
     except Exception as e:
         raise RuntimeError(f"缩略图生成失败: {e}") from e
+    # 回退时别把 MIME 写死 png：webp/jpg 标错类型，严格 CSP 下会拒绝渲染
+    from . import gallery_store
+
+    mime = gallery_store.mime_for(path.suffix.lower())
     raw = path.read_bytes()
-    return f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 async def h_thumb(plugin):
@@ -554,7 +555,9 @@ async def h_providers(plugin) -> dict:
             continue
     default_id = ""
     try:
-        cur = plugin.context.get_using_provider(None)
+        # 4.28 起同步版已被标废弃，优先 async；老版本再退回同步
+        getter = getattr(plugin.context, "get_using_provider_async", None)
+        cur = await getter(None) if getter is not None else plugin.context.get_using_provider(None)
         if cur is not None:
             default_id = str((getattr(cur, "provider_config", {}) or {}).get("id") or "")
     except Exception:

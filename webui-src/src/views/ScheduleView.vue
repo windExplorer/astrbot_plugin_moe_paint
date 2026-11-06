@@ -122,11 +122,37 @@ watch(cfgLoaded, (v) => {
   if (v) hydrate();
 });
 
-watch([intervalValue, intervalUnit], () => {
-  if (hydrating.value) return;
+/** 当前「数字 + 单位」折算成分钟（保存、预览、切单位都用它）。 */
+function minutesNow(): number {
   const unit = UNIT_MINUTES[intervalUnit.value] || 60;
-  const minutes = Math.max(1, Math.round((Number(intervalValue.value) || 1) * unit));
-  cfgSet("schedule.interval_minutes", minutes);
+  return Math.max(1, Math.round((Number(intervalValue.value) || 1) * unit));
+}
+
+watch(intervalValue, () => {
+  if (hydrating.value) return;
+  cfgSet("schedule.interval_minutes", minutesNow());
+});
+
+// 切换单位时保持「总时长不变」：6 小时 → 0.25 天，除不尽就退回分钟。
+// 以前只把同一个数字乘新单位，点一下「天」6 小时就直接变成 6 天（8640 分钟）。
+// hydrating 同时充当重入锁：下面改 intervalUnit/intervalValue 会触发自己的
+// watcher，不加锁会来回横跳。
+watch(intervalUnit, (u, old) => {
+  if (hydrating.value) return;
+  const total = Math.max(
+    1,
+    Math.round((Number(intervalValue.value) || 1) * (UNIT_MINUTES[old as Unit] || 60)),
+  );
+  const unitMin = UNIT_MINUTES[u] || 60;
+  const raw = total / unitMin;
+  const keepUnit = Number.isInteger(raw) && raw >= 1;
+  hydrating.value = true;
+  if (!keepUnit) intervalUnit.value = "minute";
+  intervalValue.value = keepUnit ? raw : total;
+  cfgSet("schedule.interval_minutes", total);
+  nextTick(() => {
+    hydrating.value = false;
+  });
 });
 
 watch(jitterOn, (v) => {
@@ -165,10 +191,7 @@ const preview = computed(() =>
   }),
 );
 
-const previewMinutes = computed(() => {
-  const unit = UNIT_MINUTES[intervalUnit.value] || 60;
-  return Math.max(1, Math.round((Number(intervalValue.value) || 1) * unit));
-});
+const previewMinutes = computed(minutesNow);
 
 const todayPct = computed(() => {
   const cap = status.value?.max_per_day || 0;

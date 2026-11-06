@@ -92,6 +92,20 @@ check("advance_interval", scheduler.advance(cfg_i, now10, rng) == now10.replace(
 check("advance_legacy_hours", scheduler.advance(cfg_legacy, now10, rng) == now10.replace(hour=12))
 check("advance_daily", scheduler.advance(cfg_d, now10, rng) == datetime(2026, 11, 6, 20, 0))
 
+# ---------- v0.7.7：跳过本轮后必须落到未来（暂停很久后恢复不能空转刷日志） ----------
+CFG_SKIP = {"mode": "interval", "interval_minutes": 60, "jitter_minutes": 0}
+SKIP_NOW = datetime(2026, 11, 6, 12, 0)
+got = scheduler.skip_next(CFG_SKIP, datetime(2026, 10, 1, 9, 0), SKIP_NOW, random.Random(1))
+check("skip_next_future", got > SKIP_NOW, str(got))
+check("skip_next_no_long_drift", got - SKIP_NOW <= timedelta(minutes=61), str(got - SKIP_NOW))
+got = scheduler.skip_next(CFG_SKIP, SKIP_NOW - timedelta(minutes=1), SKIP_NOW, random.Random(1))
+check("skip_next_one_interval", got == SKIP_NOW + timedelta(minutes=59), str(got))
+got = scheduler.skip_next(
+    {"mode": "daily", "daily_times": "09:30,20:00"},
+    datetime(2026, 10, 1, 9, 30), SKIP_NOW, random.Random(1),
+)
+check("skip_next_daily_future", got > SKIP_NOW and got.hour == 20, str(got))
+
 # ---------- 状态默认 ----------
 st = scheduler.ScheduleState()
 check("state_defaults", st.next_due is None and st.consecutive_failures == 0 and not st.auto_paused)

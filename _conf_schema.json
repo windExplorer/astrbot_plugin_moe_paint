@@ -267,6 +267,18 @@
     "default": false,
     "hint": "关闭（默认）：「立即画一张」与 /绘卷 画一张 不推进顺序轮换，定时计划严格按自己的节奏走；开启则所有成功出图都算一轮（v0.7.3 及以前的行为）。失败轮一律不占位"
   },
+  "manual_draw_admin_only": {
+    "description": "指令手动出图仅管理员",
+    "type": "bool",
+    "default": true,
+    "hint": "开启（默认）时只有 AstrBot 管理员能用「/绘卷 画一张」。关掉则任何群成员都能触发：每次会独占生成锁几十秒到几分钟，期间到点的定时任务会被顺延掉一轮，共用一台 ComfyUI 时尤其容易被刷爆。控制台的「立即画一张」不受此限制"
+  },
+  "manual_draw_cooldown_sec": {
+    "description": "指令手动出图冷却（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "同一个会话两次「/绘卷 画一张」之间的最小间隔，0 = 不限制。按会话记账，不会因为别人点过就拦你"
+  },
   "workflow_templates": {
     "description": "工作流模板清单",
     "type": "template_list",

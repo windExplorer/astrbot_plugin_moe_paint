@@ -29,8 +29,8 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.star.filter.command import GreedyStr
 
 from . import (
-    comfy_client, delivery, errfmt, gallery_store, prompter, scheduler,
-    webui_api, workflow_mgr,
+    comfy_client, config_coerce, delivery, errfmt, gallery_store, prompter,
+    scheduler, webui_api, workflow_mgr,
 )
 
 PLUGIN_NAME = "astrbot_plugin_moe_paint"
@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.6",
+    "v0.7.7",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -93,6 +93,13 @@ class MoePaintPlugin(Star):
         self._client: "comfy_client.ComfyUIClient | None" = None
         self._client_key: "tuple | None" = None
         self._templates: "list[workflow_mgr.Template]" = []
+        # 后台任务强引用：asyncio 只持弱引用，ensure_future 的返回值不接住
+        # 可能在 GC 时被回收（官方文档明说），异常也不会被检索。
+        self._bg_tasks: "set[asyncio.Task]" = set()
+        # ComfyUI 探活结果缓存：(时间戳, 结果)，控制台轮询不重复打服务器
+        self._probe_cache: "tuple[float, dict] | None" = None
+        # 手动出图冷却：会话 UMO → 上次触发时刻（秒）
+        self._manual_last: "dict[str, float]" = {}
         # 调试用的内存环形日志（不落盘，重启即清空；WebUI「调试」页读它）
         self._logs: "deque[dict]" = deque(maxlen=400)
 
@@ -131,7 +138,9 @@ class MoePaintPlugin(Star):
                     )
             except Exception as e:
                 logger.warning(f"{PLUGIN_TAG} 读取上次生成时间失败（从当前时间起算）: {e}")
-            # 上次进程退出时可能留下 status=running 的记录（图库里会永远「生成中」且理由为空）
+            # 上次进程退出时可能留下 status=running 的记录（图库里会永远「生成中」且理由为空）。
+            # 这里只清「已经超过 15 分钟」的（热重载时旧实例可能真在画，别误伤）；
+            # 更年轻的那批由调度循环的周期性兜底收尾（scheduler._sweep_stale）。
             stale = await self.store.fail_stale_running()
             if stale:
                 logger.info(f"{PLUGIN_TAG} 已把 {stale} 条中断的旧记录收尾为失败（含中断原因）")
@@ -158,6 +167,12 @@ class MoePaintPlugin(Star):
         if task is not None:
             task.cancel()
             self._sched_task = None
+        for bg in list(self._bg_tasks):
+            try:
+                bg.cancel()
+            except Exception:
+                pass
+        self._bg_tasks.clear()
         try:
             if self._client is not None:
                 await self._client.close()
@@ -184,8 +199,16 @@ class MoePaintPlugin(Star):
         return self._sub("delivery")
 
     def _delivery_sessions(self) -> list:
+        """投递会话名单（去重保序）：手改配置重复一行不该重复发。"""
         lst = self._delivery_cfg().get("sessions")
-        return [str(u) for u in lst if str(u or "").strip()] if isinstance(lst, list) else []
+        if not isinstance(lst, list):
+            return []
+        out: list[str] = []
+        for u in lst:
+            s = str(u or "").strip()
+            if s and s not in out:
+                out.append(s)
+        return out
 
     def _save(self) -> None:
         try:
@@ -490,7 +513,12 @@ class MoePaintPlugin(Star):
             tag_style = str(profile.get("tag_style") or "danbooru")
         else:
             tag_style = mode
-        quality = str(profile.get("quality_prefix") or "") if tag_style == "danbooru" else ""
+        # 与本地库口径保持一致（workflow_mgr.load_templates）：danbooru 系即使认不出
+        # 底模家族也要有质量词兜底，否则同样的模板换个来源就少一段质量词。
+        quality = (
+            str(profile.get("quality_prefix") or prompter.QUALITY_PREFIX_DANBOORU)
+            if tag_style == "danbooru" else ""
+        )
         # 逐条可画类型优先；没单独配的回落到整体开关 anima.subject_scope（默认 auto 按底模推断）
         overrides = workflow_mgr.parse_scope_overrides(acfg.get("workflow_scopes"))
         scope_cfg = workflow_mgr.workflow_scope_for(chosen, overrides, acfg.get("subject_scope"))
@@ -534,8 +562,36 @@ class MoePaintPlugin(Star):
             self._client = comfy_client.ComfyUIClient(url, timeout=timeout)
             self._client_key = key
             if old is not None:
-                asyncio.ensure_future(self._close_quietly(old))
+                self.spawn(self._close_quietly(old))
         return self._client
+
+    def spawn(self, coro) -> "asyncio.Task | None":
+        """起一个后台协程并**持有强引用**。
+
+        asyncio 对 task 只持弱引用：`asyncio.ensure_future(...)` 的返回值不接住，
+        task 可能在跑完前被 GC 掉，异常也只会变成 "Task was destroyed but it is
+        pending"。这里统一记账，terminate 时一并取消。
+        """
+        try:
+            task = asyncio.ensure_future(coro)
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 后台任务创建失败: {errfmt.format_exc(e)}")
+            return None
+        self._bg_tasks.add(task)
+
+        def _done(t: "asyncio.Task") -> None:
+            self._bg_tasks.discard(t)
+            try:
+                exc = t.exception()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                return
+            if exc is not None:
+                logger.warning(f"{PLUGIN_TAG} 后台任务异常: {errfmt.format_exc(exc)}")
+
+        task.add_done_callback(_done)
+        return task
 
     @staticmethod
     async def _close_quietly(client) -> None:
@@ -544,9 +600,23 @@ class MoePaintPlugin(Star):
         except Exception:
             pass
 
-    async def _comfy_status(self) -> dict:
-        """WebUI 状态页用：探活（6s 封顶，不阻塞页面）。"""
+    async def _comfy_status(self, max_age: float = 20.0) -> dict:
+        """WebUI 状态页用：探活（6s 封顶，不阻塞页面）。
+
+        `max_age` 内直接复用上次结果：控制台总览每 10 秒轮询一次，每次都真打两发
+        HTTP 会把远端 ComfyUI 当靶子（还拖慢自己的状态接口）。调试页走
+        `debug_comfy()`，那条永远真探。
+        """
         url, src = self._comfy_url()
+        now = time.time()
+        cached = self._probe_cache
+        if (
+            max_age > 0
+            and cached is not None
+            and now - cached[0] <= max_age
+            and str((cached[1] or {}).get("url") or "") == url
+        ):
+            return dict(cached[1])
         client = self._get_client()
         if client is None:
             return {"ok": False, "error": "客户端未初始化", "url": url, "source": src}
@@ -559,7 +629,8 @@ class MoePaintPlugin(Star):
         res = dict(res or {})
         res["url"] = url
         res["source"] = src
-        return res
+        self._probe_cache = (now, res)
+        return dict(res)
 
     async def debug_comfy(self, url: str = "", timeout_s: int = 8) -> dict:
         """调试：对指定地址（空 = 当前生效地址）探活 + 读队列，不写任何配置。"""
@@ -606,7 +677,13 @@ class MoePaintPlugin(Star):
     # LLM
     # ------------------------------------------------------------------ #
 
-    def _provider(self):
+    async def _provider(self):
+        """取提示词用的 LLM：配置里指定的 → 全局默认。
+
+        v0.7.7：全局默认改走 `get_using_provider_async()`。`context.get_using_provider()`
+        从 4.28 起标了 `@deprecated`，而控制台每 10 秒轮询一次 `/status`，等于持续踩
+        废弃接口；老版本没有 async 版时再退回同步版。
+        """
         pid = str(self._sub("llm").get("provider_id") or "").strip()
         if pid:
             try:
@@ -615,6 +692,14 @@ class MoePaintPlugin(Star):
                     return p
             except Exception as e:
                 logger.warning(f"{PLUGIN_TAG} 按 provider_id 取模型失败（退回全局默认）: {e}")
+        getter = getattr(self.context, "get_using_provider_async", None)
+        if getter is not None:
+            try:
+                p = await getter(None)
+                if p is not None:
+                    return p
+            except Exception as e:
+                logger.warning(f"{PLUGIN_TAG} 取全局默认提供商失败（async 版）: {e}")
         try:
             return self.context.get_using_provider(None)
         except Exception as e:
@@ -644,7 +729,7 @@ class MoePaintPlugin(Star):
 
     async def _llm_prompt(self, brief: dict, tpl: "workflow_mgr.Template") -> tuple[dict, str, float]:
         """按简报生成 JSON 契约载荷；解析失败重试 1 次（更严指令）。返回 (载荷, provider标签, 耗时ms)。"""
-        provider = self._provider()
+        provider = await self._provider()
         if provider is None:
             raise RuntimeError("没有可用 LLM 提供商（先在 WebUI 配置好对话模型，或在本插件配置里指定 provider_id）")
         pid = str(self._sub("llm").get("provider_id") or "").strip()
@@ -791,6 +876,21 @@ class MoePaintPlugin(Star):
         if not workflow_mgr.enabled_pool(self._templates):
             logger.warning(f"{PLUGIN_TAG} 没有可用的工作流模板，调度会空转（检查配置 workflow_templates）")
 
+    def templates_for_ui(self) -> list:
+        """控制台展示用的模板快照：**不重载**，只在从未加载过时补一次。
+
+        为什么不能每次重载：`/status` 被前端每 10 秒轮询一次，而重载要读工作流
+        JSON；跟随萌绘时还要走 `_load_from_base()`，那个方法内部每次都写一条
+        「【底模】…」日志——用户只要开着总览页，AstrBot 日志就被刷成流水。
+        配置变更（保存/上传）与 `/workflows` 自己会调 `reload_templates()`。
+        """
+        if not self._templates:
+            try:
+                self.reload_templates()
+            except Exception as e:
+                logger.warning(f"{PLUGIN_TAG} 模板首次加载失败: {e}")
+        return self._templates
+
     # ------------------------------------------------------------------ #
     # 顺序轮换：游标（记「上一张是谁」）与控制台视图
     # ------------------------------------------------------------------ #
@@ -923,6 +1023,12 @@ class MoePaintPlugin(Star):
             return {"ok": False, "error": "插件配置不可写"}
         entries = cfg.get("workflow_templates")
         entries = entries if isinstance(entries, list) else []
+        # 记下同名条目的旧文件名：改名后旧 JSON 会变成没人引用的死文件
+        old_file = ""
+        for e in entries:
+            if isinstance(e, dict) and str(e.get("name") or "").strip() == name:
+                old_file = str(e.get("file") or "").strip()
+                break
         new_entries, replaced = workflow_mgr.upsert_entry(entries, entry)
         cfg["workflow_templates"] = new_entries
         try:
@@ -934,6 +1040,7 @@ class MoePaintPlugin(Star):
             self.reload_templates()
         except Exception as e:
             logger.warning(f"{PLUGIN_TAG} 模板重载失败: {e}")
+        self._drop_orphan_workflow_file(old_file, fname, new_entries)
         logger.info(f"{PLUGIN_TAG} 工作流已入库「{name}」→ {fname}（{'覆盖' if replaced else '新增'}）")
         self.debug_log("workflow", f"上传工作流「{name}」（{fname}，{'覆盖' if replaced else '新增'}）")
         return {
@@ -944,6 +1051,42 @@ class MoePaintPlugin(Star):
             "nodes": preview.get("nodes") or {},
             "warnings": preview.get("warnings") or [],
         }
+
+    def _drop_orphan_workflow_file(self, old_file: str, new_file: str, entries: list) -> None:
+        """删掉「改名后被落下、且没有任何条目再引用」的旧工作流文件。
+
+        只处理这一条改名留下的那个文件，绝不按「未被引用」批量清理——README 允许
+        用户手动把 API JSON 丢进 workflows/ 再登记，批量清会直接删掉用户素材。
+        内置起步工作流也不删（删了下次启动又会从 builtin/ 复制回来，白折腾）。
+        """
+        if self.workflows_dir is None:
+            return
+        old = str(old_file or "").strip()
+        new = str(new_file or "").strip()
+        if not old:
+            return
+        if not old.endswith(".json"):
+            old = f"{old}.json"
+        if new and not new.endswith(".json"):
+            new = f"{new}.json"
+        if old == new or old == workflow_mgr.BUILTIN_WORKFLOW_FILE:
+            return
+        for e in entries or []:
+            if not isinstance(e, dict):
+                continue
+            f = str(e.get("file") or "").strip()
+            if f and not f.endswith(".json"):
+                f = f"{f}.json"
+            if f == old:
+                return
+        try:
+            (self.workflows_dir / old).unlink()
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            logger.warning(f"{PLUGIN_TAG} 清理旧工作流文件失败（忽略）: {e}")
+            return
+        logger.info(f"{PLUGIN_TAG} 已清理改名后不再引用的工作流文件: {old}")
 
     # ------------------------------------------------------------------ #
     # 生成管线
@@ -969,8 +1112,7 @@ class MoePaintPlugin(Star):
         """异步触发一张（WebUI/跨插件用，立即返回；结果进图库并按名单投递）。"""
         if self._gen_lock.locked():
             return False
-        asyncio.ensure_future(self.generate_one(reason=f"manual:{source}", theme=theme))
-        return True
+        return self.spawn(self.generate_one(reason=f"manual:{source}", theme=theme)) is not None
 
     async def generate_one(self, reason: str = "schedule", theme: str = "", event: "AstrMessageEvent | None" = None) -> dict:
         """完整跑一轮：抽签 → LLM → 注入 → 出图 → 归档 → 投递。
@@ -1102,25 +1244,20 @@ class MoePaintPlugin(Star):
                     f"#{rec_id} 成功（{tpl.name} {width}x{height}，总 {gen_ms / 1000:.1f}s，"
                     f"LLM {llm_ms / 1000:.1f}s）",
                 )
-
-                # 投递：指令触发 → 当前会话直发；其余 → 白名单会话
-                if event is not None:
-                    dcfg = self._delivery_cfg()
-                    cap = delivery.build_caption(
-                        dcfg.get("caption_template"), caption, brief["category"],
-                        brief["subject"], tpl.name,
-                        caption_on=bool(dcfg.get("caption_on", True)),
+            except asyncio.CancelledError:
+                # 被硬超时/插件卸载取消：必须落一行收尾，否则这条记录永远是「生成中」
+                msg = "生成被取消（超时或插件重载），本轮没有结果"
+                try:
+                    await store.update_generation(
+                        rec_id, status="failed", error=msg,
+                        gen_latency_ms=round((time.monotonic() - t0) * 1000, 1),
                     )
-                    comps = ([Plain(cap)] if cap else []) + [Image.fromFileSystem(abs_path)]
-                    await event.send(MessageChain(chain=comps))
-                    await store.merge_delivered(
-                        rec_id,
-                        [{"umo": event.unified_msg_origin, "ok": True,
-                          "ts": int(time.time()), "via": "command"}],
-                    )
-                else:
-                    rec = await store.get_record(rec_id)
-                    await delivery.deliver_record(self, rec)
+                except Exception:
+                    pass
+                summary["error"] = msg
+                logger.warning(f"{PLUGIN_TAG} 生成被取消 #{rec_id}")
+                self.debug_log("error", f"#{rec_id} 已取消（超时/重载）")
+                raise
             except Exception as e:
                 summary["error"] = errfmt.truncate(errfmt.format_exc(e), 300)
                 try:
@@ -1132,6 +1269,35 @@ class MoePaintPlugin(Star):
                     pass
                 logger.error(f"{PLUGIN_TAG} 生成失败 #{rec_id}: {summary['error']}")
                 self.debug_log("error", f"#{rec_id} 失败：{summary['error']}")
+
+            # 投递独立于上面的生成 try（v0.7.7）。以前投递异常会落进同一个 except，
+            # 把刚写完的 success 又改成 failed —— 图在库里、记录显示失败、图库还
+            # 因为状态不是 success 而不加载缩略图，看上去像「画出来了但坏了」。
+            # 指令触发 → 当前会话直发；其余 → 白名单会话。
+            if summary.get("ok"):
+                try:
+                    if event is not None:
+                        dcfg = self._delivery_cfg()
+                        cap = delivery.build_caption(
+                            dcfg.get("caption_template"), caption, brief["category"],
+                            brief["subject"], tpl.name,
+                            caption_on=config_coerce.truthy(dcfg.get("caption_on", True), True),
+                        )
+                        comps = ([Plain(cap)] if cap else []) + [Image.fromFileSystem(abs_path)]
+                        await event.send(MessageChain(chain=comps))
+                        await store.merge_delivered(
+                            rec_id,
+                            [{"umo": event.unified_msg_origin, "ok": True,
+                              "ts": int(time.time()), "via": "command"}],
+                        )
+                    else:
+                        rec = await store.get_record(rec_id)
+                        await delivery.deliver_record(self, rec)
+                except Exception as e:
+                    err = errfmt.truncate(errfmt.format_exc(e), 200)
+                    summary["delivery_error"] = err
+                    logger.warning(f"{PLUGIN_TAG} #{rec_id} 投递失败（图已入库，状态保持成功）: {err}")
+                    self.debug_log("delivery", f"#{rec_id} 投递失败：{err}")
             # 收尾：LRU 淘汰（低频，失败也做）
             try:
                 max_mb = self._float_of(self._sub("gallery"), "max_total_mb", 1024.0)
@@ -1306,10 +1472,41 @@ class MoePaintPlugin(Star):
             "用「/绘卷 投递 开启|关闭」修改。",
         )
 
+    def manual_draw_gate(self, is_admin: bool, umo: str, now: float = 0.0) -> "tuple[bool, str]":
+        """指令「画一张」的准入判定（纯判定，便于自检）：管理员开关 + 按会话冷却。
+
+        为什么要有：这个指令会独占生成锁几十秒到几分钟，而调度器遇到锁占用是把
+        整轮定时任务顺延掉一个间隔（scheduler 的「上一张仍在生成」分支）。没有闸门
+        等于任何群成员都能刷图并把定时计划挤掉。
+        冷却按会话 UMO 记账，不是全局：群里两个人同时点只该拦第二个。
+        """
+        if config_coerce.truthy(self._cfg().get("manual_draw_admin_only", True), True) and not is_admin:
+            return False, "「/绘卷 画一张」仅管理员可用（想放开请到控制台「生成服务」页关掉对应开关）"
+        cooldown = self._int_of(self._cfg(), "manual_draw_cooldown_sec", 60, lo=0, hi=3600)
+        if cooldown <= 0:
+            return True, ""
+        ts = float(now or time.time())
+        last = float(self._manual_last.get(str(umo)) or 0)
+        if last and ts - last < cooldown:
+            wait = int(cooldown - (ts - last)) + 1
+            return False, f"手动出图冷却中，再等 {wait} 秒（控制台可调）"
+        return True, ""
+
+    def mark_manual_draw(self, umo: str) -> None:
+        try:
+            self._manual_last[str(umo)] = time.time()
+        except Exception:
+            pass
+
     async def _manual_draw(self, event: AstrMessageEvent, theme: str) -> None:
+        allowed, why = self.manual_draw_gate(bool(event.is_admin()), event.unified_msg_origin)
+        if not allowed:
+            await self._send_text(event, why)
+            return
         if self._gen_lock.locked():
             await self._send_text(event, "上一张还在生成中，稍等它画完再试。")
             return
+        self.mark_manual_draw(event.unified_msg_origin)
         await self._send_text(event, "开始生成，画好直接发到这里（一般 20~90 秒）…")
         summary = await self.generate_one(reason="manual", theme=theme, event=event)
         if summary.get("skipped"):
@@ -1354,7 +1551,8 @@ class MoePaintPlugin(Star):
         sessions = self._delivery_sessions()
         lines.append(f"投递会话：{len(sessions)} 个" + ("" if sessions else "（空 = 只入库不投递）"))
         pid = str(self._sub("llm").get("provider_id") or "").strip()
-        lines.append(f"LLM：{pid or '全局默认提供商'}（{'已找到' if self._provider() is not None else '未找到！'}）")
+        prov_ok = (await self._provider()) is not None
+        lines.append(f"LLM：{pid or '全局默认提供商'}（{'已找到' if prov_ok else '未找到！'}）")
         await self._send_text(event, "\n".join(lines))
 
     def _schedule_desc(self) -> str:
@@ -1380,7 +1578,9 @@ class MoePaintPlugin(Star):
             else:
                 span = f"每 {minutes} 分钟"
             jitter = self._int_of(scfg, "jitter_minutes", 0, lo=0, hi=1440)
-            desc = f"{span}" + (f" ±{jitter} 分钟" if jitter else "")
+            # jitter 只加不减（scheduler.interval_next），文案必须跟着实现走，
+            # 写「±N」会让人以为会往前浮动。
+            desc = f"{span}" + (f"（+0~{jitter} 分钟）" if jitter else "")
         if scheduler.quiet_span_of(scfg) is not None:
             desc += f"，安静时段 {scfg.get('quiet_hours')} 跳过"
         return desc

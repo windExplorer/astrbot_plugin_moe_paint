@@ -107,6 +107,8 @@ def main() -> int:
         ("anima", "workflow_scopes"),
         ("workflow_source",),
         ("rotation_manual_advances",),
+        ("manual_draw_admin_only",),
+        ("manual_draw_cooldown_sec",),
         ("delivery", "sessions"),
         ("gallery", "max_total_mb"),
         ("theme", "category_weights"),
@@ -157,6 +159,8 @@ def main() -> int:
         )
         check("默认配置含 prompt 分组", isinstance(conf.get("prompt"), dict))
         check("人物锚定默认开启", conf.get("prompt", {}).get("persona_enabled") is True)
+        # 安全默认：指令手动出图只给管理员（任何群成员都能刷 = 挤掉定时轮次）
+        check("手动出图默认仅管理员", conf.get("manual_draw_admin_only") is True)
     except Exception as e:
         check("可被 AstrBot 解析成默认配置", False, f"{type(e).__name__}: {e}")
 

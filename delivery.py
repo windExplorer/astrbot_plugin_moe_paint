@@ -14,9 +14,21 @@ from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import StarTools
 
-from . import errfmt
+from . import config_coerce, errfmt
 
 PLUGIN_TAG = "[萌萌绘卷]"
+
+
+def _dedupe(sessions) -> list:
+    """会话名单去重（保持原顺序）：手改配置重复一行不该重复投递。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in sessions or []:
+        u = str(s or "").strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 def build_caption(
@@ -43,7 +55,7 @@ async def deliver_record(plugin, rec: dict, sessions: "list | None" = None) -> l
     """
     if rec is None or not rec.get("image_relpath"):
         return []
-    targets = list(sessions) if sessions is not None else plugin._delivery_sessions()
+    targets = _dedupe(sessions if sessions is not None else plugin._delivery_sessions())
     if not targets:
         return []
     abs_path = plugin.gallery_abs(rec.get("image_relpath"))
@@ -57,13 +69,15 @@ async def deliver_record(plugin, rec: dict, sessions: "list | None" = None) -> l
 
     caption = None
     try:
+        dcfg = plugin._delivery_cfg()
         caption = build_caption(
-            plugin._delivery_cfg().get("caption_template"),
+            dcfg.get("caption_template"),
             rec.get("caption") or "",
             rec.get("category") or "",
             _subject_of(rec),
             rec.get("workflow") or "",
-            caption_on=bool(plugin._delivery_cfg().get("caption_on", True)),
+            # 字符串 "false" 也要当真（bool("false") is True 是经典坑）
+            caption_on=config_coerce.truthy(dcfg.get("caption_on", True), True),
         )
     except Exception as e:
         logger.warning(f"{PLUGIN_TAG} 投递文案拼装失败（改发纯图）: {e}")

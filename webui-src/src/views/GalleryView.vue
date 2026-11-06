@@ -27,7 +27,7 @@ import {
   apiThumb,
   type GenRecord,
 } from "../api";
-import { status } from "../store";
+import { refreshStats, stats, status } from "../store";
 import { useAutoRefresh } from "../polling";
 import { briefText, copyText, fmtDur, fmtTs, parseBrief } from "../utils";
 import ImageViewer from "../components/ImageViewer.vue";
@@ -75,7 +75,10 @@ const statusOptions = [
 ];
 
 const categoryOptions = computed(() => {
+  // 以全局统计为准（stats.by_category 覆盖全部历史），当前页记录只作兜底：
+  // 只从本页 24 条里取的话，翻页/换筛选后下拉选项会变，老类别再也选不到。
   const set = new Set<string>();
+  for (const c of stats.value?.by_category || []) if (c.category) set.add(c.category);
   for (const r of records.value) if (r.category) set.add(r.category);
   return [
     { label: "全部类别", value: "" },
@@ -266,7 +269,11 @@ function copy(text: string, label: string) {
   copyText(text, label, (m) => message.success(m));
 }
 
-onMounted(() => void loadRecords());
+onMounted(() => {
+  void loadRecords();
+  // 类别下拉依赖全局统计（stats.by_category），本页不一定刷过
+  void refreshStats();
+});
 </script>
 
 <template>
@@ -315,6 +322,7 @@ onMounted(() => void loadRecords());
         >
           <div class="thumb">
             <img v-if="r.status === 'success' && thumbs[r.id]" :src="thumbs[r.id]" alt="" loading="lazy" />
+            <div v-else-if="r.pruned" class="ph ph-fail"><span>已按容量清理</span></div>
             <div v-else-if="r.status === 'success'" class="ph"><n-spin size="small" /></div>
             <div v-else-if="r.status === 'running'" class="ph"><n-spin size="small" /><span>生成中…</span></div>
             <div v-else class="ph ph-fail"><span>失败</span></div>
@@ -366,7 +374,13 @@ onMounted(() => void loadRecords());
               <img v-if="detailBig" :src="detailBig" alt="" />
               <n-empty
                 v-else-if="!detailLoading"
-                :description="detail.status === 'failed' ? '生成失败，无图片' : '无图片'"
+                :description="
+                  detail.pruned
+                    ? '图片已按容量上限清理（记录保留）'
+                    : detail.status === 'failed'
+                      ? '生成失败，无图片'
+                      : '无图片'
+                "
               />
             </n-spin>
             <div v-if="detail.status === 'success' && detailBig" class="big-hint">点击看大图</div>
@@ -376,7 +390,12 @@ onMounted(() => void loadRecords());
             <n-button size="small" @click="starToggle(detail)">
               {{ detail.starred ? "★ 已收藏" : "☆ 收藏（防淘汰）" }}
             </n-button>
-            <n-button size="small" :disabled="detail.status !== 'success'" :loading="acting" @click="resend(detail)">
+            <n-button
+              size="small"
+              :disabled="detail.status !== 'success' || !detail.image_relpath"
+              :loading="acting"
+              @click="resend(detail)"
+            >
               重投白名单
             </n-button>
             <n-button size="small" @click="copy(detail.prompt, '提示词')">复制提示词</n-button>
@@ -398,6 +417,9 @@ onMounted(() => void loadRecords());
             <n-descriptions-item label="状态">
               <n-tag size="small" :type="detail.status === 'success' ? 'success' : detail.status === 'failed' ? 'error' : 'info'">
                 {{ detail.status }}
+              </n-tag>
+              <n-tag v-if="detail.pruned" size="small" type="warning" style="margin-left: 6px">
+                图已清理
               </n-tag>
             </n-descriptions-item>
             <n-descriptions-item label="时间">{{ fmtTs(detail.ts) }}</n-descriptions-item>

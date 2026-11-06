@@ -121,6 +121,7 @@ export interface GenRecord {
   height: number | null;
   seed: number | null;
   comfy_prompt_id: string;
+  /** 库内相对路径；被 LRU 淘汰/清理后为空串 */
   image_relpath: string;
   sha256: string;
   caption: string;
@@ -129,6 +130,8 @@ export interface GenRecord {
   gen_latency_ms: number | null;
   error: string;
   starred: 0 | 1 | number;
+  /** 1 = 图片已按容量上限清理（记录仍在，可看提示词/简报） */
+  pruned?: 0 | 1 | number;
   delivered?: DeliveredItem[];
 }
 

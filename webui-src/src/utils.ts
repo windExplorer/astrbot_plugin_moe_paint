@@ -132,7 +132,9 @@ export function scheduleSummary(s: {
     base = `每天 ${String(s.daily_times || "").trim() || "（未填时刻）"}`;
   } else {
     const jitter = Number(s.jitter_minutes || 0);
-    base = `每 ${minutesHuman(s.interval_minutes)}${jitter > 0 ? ` ±${jitter} 分钟` : ""}`;
+    // 后端只往后浮动（scheduler.interval_next: minutes += uniform(0, jitter)），
+    // 写「±」会让人以为会提前，实际每张都只会更晚。
+    base = `每 ${minutesHuman(s.interval_minutes)}${jitter > 0 ? `（+0~${jitter} 分钟）` : ""}`;
   }
   const q = String(s.quiet_hours || "").trim();
   if (s.quiet_enabled && q) base += `；安静时段 ${q.replace("-", "–")} 不画`;

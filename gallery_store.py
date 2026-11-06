@@ -16,6 +16,13 @@ from pathlib import Path
 
 import aiosqlite
 
+try:  # 独立测试环境没有 astrbot 运行时，退回标准 logging（scheduler.py 同款）
+    from astrbot.api import logger
+except Exception:  # pragma: no cover
+    import logging
+
+    logger = logging.getLogger("astrbot")
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS generations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +48,8 @@ CREATE TABLE IF NOT EXISTS generations (
     gen_latency_ms  REAL,
     error           TEXT    NOT NULL DEFAULT '',
     delivered_json  TEXT    NOT NULL DEFAULT '[]',
-    starred         INTEGER NOT NULL DEFAULT 0
+    starred         INTEGER NOT NULL DEFAULT 0,
+    pruned          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_gen_ts      ON generations(ts);
 CREATE INDEX IF NOT EXISTS idx_gen_status  ON generations(status, ts);
@@ -58,7 +66,12 @@ _UPDATE_COLS = {
     "status", "reason", "category", "brief", "prompt", "negative", "tag_style",
     "workflow", "width", "height", "seed", "comfy_prompt_id", "image_relpath",
     "sha256", "caption", "llm_provider", "llm_latency_ms", "gen_latency_ms",
-    "error", "delivered_json", "starred",
+    "error", "delivered_json", "starred", "pruned",
+}
+
+# 老库升级时要补的列（CREATE TABLE IF NOT EXISTS 不会给已有表加列）
+_MIGRATE_COLUMNS = {
+    "pruned": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _MIME = {
@@ -86,6 +99,17 @@ def mime_for(ext: str) -> str:
     return _MIME.get(str(ext or "").lower(), "image/png")
 
 
+def _like_pattern(keyword: str) -> str:
+    """关键词 → LIKE 模式串：转义 % _ 与反斜杠。
+
+    不转义的话搜「100%」等于搜「所有记录」、搜「a_b」会把 aXb 也算命中，
+    用户看到的是「搜索不生效」而不是「写法有问题」。
+    """
+    s = str(keyword or "")
+    s = s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{s}%"
+
+
 def archive_image(gallery_dir: Path, data: bytes, ext: str) -> tuple[str, str, str, bool]:
     """落盘归档：返回 (绝对路径, 库内相对路径, sha256前16位, 是否重复内容)。
 
@@ -99,12 +123,25 @@ def archive_image(gallery_dir: Path, data: bytes, ext: str) -> tuple[str, str, s
     target = gallery_dir / month
     target.mkdir(parents=True, exist_ok=True)
     path = target / f"{short}{ext}"
-    dedup = path.is_file()
-    if not dedup:
-        tmp = target / f".tmp{os.getpid()}-{short}{ext}"
-        tmp.write_bytes(data)
-        os.replace(tmp, path)  # 原子替换，断电不留半个文件
-    return str(path), rel, short, dedup
+    if path.is_file():
+        return str(path), rel, short, True
+    # 跨月去重：同一份内容上个月已经落过盘就复用那条路径。只认当前月会让
+    # 「内容寻址」每月各存一份，重复占空间（同一张图反复抽到就很明显）。
+    try:
+        for cand in gallery_dir.glob(f"*/{short}{ext}"):
+            if not cand.is_file():
+                continue
+            try:
+                old_rel = str(cand.relative_to(gallery_dir)).replace("\\", "/")
+            except ValueError:
+                continue
+            return str(cand), old_rel, short, True
+    except OSError:
+        pass
+    tmp = target / f".tmp{os.getpid()}-{short}{ext}"
+    tmp.write_bytes(data)
+    os.replace(tmp, path)  # 原子替换，断电不留半个文件
+    return str(path), rel, short, False
 
 
 class Store:
@@ -117,7 +154,24 @@ class Store:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.executescript(_SCHEMA)
+            await self._migrate(db)
             await db.commit()
+
+    @staticmethod
+    async def _migrate(db) -> None:
+        """补历史库缺的列（CREATE TABLE IF NOT EXISTS 不会给已有表加列）。"""
+        try:
+            cur = await db.execute("PRAGMA table_info(generations)")
+            have = {str(row[1]) for row in await cur.fetchall()}
+        except Exception:
+            return
+        for col, ddl in _MIGRATE_COLUMNS.items():
+            if col in have:
+                continue
+            try:
+                await db.execute(f"ALTER TABLE generations ADD COLUMN {col} {ddl}")
+            except Exception as e:  # 并发/只读库：不阻断启动，读的时候按缺省处理
+                logger.warning(f"[萌萌绘卷] 记录库补列 {col} 失败（忽略）: {e}")
 
     # ---------------- 基础读写 ----------------
 
@@ -140,6 +194,13 @@ class Store:
             fields.get("error") or ""
         ).strip():
             fields["error"] = "未知错误（未记录原因）"
+        unknown = [k for k in fields if k not in _UPDATE_COLS]
+        if unknown:
+            # 以前是静默丢弃：以后加字段忘了改 _UPDATE_COLS 会表现成「写成功但没存」
+            logger.warning(
+                f"[萌萌绘卷] update_generation 忽略未知列: {', '.join(unknown)}"
+                "（新字段请加进 _UPDATE_COLS）"
+            )
         cols, vals = [], []
         for k, v in fields.items():
             if k in _UPDATE_COLS:
@@ -239,8 +300,11 @@ class Store:
             where.append("starred=?")
             vals.append(starred)
         if keyword:
-            where.append("(prompt LIKE ? OR caption LIKE ? OR brief LIKE ?)")
-            like = f"%{keyword}%"
+            where.append(
+                "(prompt LIKE ? ESCAPE '\\' OR caption LIKE ? ESCAPE '\\'"
+                " OR brief LIKE ? ESCAPE '\\')"
+            )
+            like = _like_pattern(keyword)
             vals.extend([like, like, like])
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         async with aiosqlite.connect(self.path) as db:
@@ -339,6 +403,30 @@ class Store:
             out["days"] = [{"day": r["day"], "success": int(r["n"])} for r in await cur.fetchall()]
         return out
 
+    async def mark_pruned(self, relpaths: list) -> int:
+        """把图片已被 LRU 删掉的记录标成「已清理」并清空路径，返回受影响行数。
+
+        为什么必须落库：文件删了但行还指着它，图库里就是一堆永远加载失败的
+        破图，用户既不知道为什么、也没法把行清掉。清空 relpath 后前端能明确
+        显示「已按容量清理」，而不是一直转圈。
+        """
+        rels = [str(r) for r in (relpaths or []) if str(r or "").strip()]
+        if not rels:
+            return 0
+        touched = 0
+        async with aiosqlite.connect(self.path) as db:
+            for i in range(0, len(rels), 400):  # SQLite 参数上限保守取 400
+                chunk = rels[i : i + 400]
+                marks = ",".join("?" for _ in chunk)
+                cur = await db.execute(
+                    f"UPDATE generations SET pruned=1, image_relpath='' "
+                    f"WHERE image_relpath IN ({marks})",
+                    chunk,
+                )
+                touched += int(cur.rowcount or 0)
+            await db.commit()
+        return touched
+
     async def starred_relpaths(self) -> set:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
@@ -388,6 +476,7 @@ async def prune_gallery(gallery_dir: Path, db: "Store", max_total_mb: float) -> 
         if files:
             return 0
     freed = 0
+    removed_rels: list[str] = []
     for _mtime, p in sorted(files, key=lambda t: t[0]):
         if total <= cap:
             break
@@ -399,8 +488,14 @@ async def prune_gallery(gallery_dir: Path, db: "Store", max_total_mb: float) -> 
             p.unlink()
             total -= size
             freed += 1
+            removed_rels.append(rel)
         except OSError:
             continue
+    if removed_rels:
+        try:
+            await db.mark_pruned(removed_rels)
+        except Exception as e:  # 标记失败不影响淘汰本身，只是图库里会多几个破图
+            logger.warning(f"[萌萌绘卷] 淘汰后标记记录失败（文件已删）: {e}")
     # 清掉空月份目录
     for d in gallery_dir.iterdir():
         if d.is_dir() and not any(d.iterdir()):

@@ -34,6 +34,21 @@ def resolve_spec(schema: dict, key: str) -> "tuple[str | None, str | None, dict 
     return None, None, None
 
 
+def truthy(v, default: bool = True) -> bool:
+    """配置布尔容错："false"/"0"/"off"/"no" 视为关闭；None/空串 → 默认值。
+
+    为什么必须集中一处：AstrBotConfig、WebUI、手改 JSON、老版本迁移都会出现
+    **字符串布尔**，而 `bool("false") is True`——开关会形同没有。之前只有
+    scheduler / prompter / webui_api 各留了一份，delivery 和 main 里漏用了，
+    于是 `delivery.caption_on="false"` 照样附图说、`enabled="false"` 照样跑。
+    """
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
+
+
 def cast_value(spec: dict, value, key: str):
     """按 schema 的 type 转换；bool 兼容常见字符串写法，失败抛带键名的 ValueError。"""
     t = str((spec or {}).get("type") or "string")

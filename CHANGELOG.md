@@ -1,5 +1,79 @@
 # 更新日志
 
+## v0.7.7（稳定性整修：投递不再改写状态、图库淘汰可解释、手动出图加闸门）
+
+一次通读全模块后的整修，共 15 处，按「会写错数据」→「能刷爆」→「看起来不对」排序。
+
+### 一、会写错数据
+
+1. **投递异常会把成功记录改成失败**（`main.py::_generate`）。原先生成与投递共用同一个
+   `try`，`event.send` / `deliver_record` 一抛异常就落进 `except` 把刚写完的 `success`
+   改成 `failed`。后果：图已经在 `gallery/` 里、`image_relpath` 也有，但记录状态是失败，
+   而图库前端只给 `success` 加载缩略图 —— 用户看到「画出来了但显示失败且没图」，
+   调度器那边却按 `summary["ok"]` 算成功，两边口径不一致。
+   现在投递独立成一段，失败只写 `delivery_error` + 日志 + `delivered_json`，绝不动状态。
+2. **图库 LRU 淘汰只删文件、不处理记录**（`gallery_store.prune_gallery`）。被淘汰的行
+   一直指着已删除的路径，图库里就是永远加载失败的破图，且不会自愈。
+   新增 `pruned` 列（老库自动 `ALTER TABLE` 补列）+ `Store.mark_pruned()`：淘汰时同步
+   标记并清空 `image_relpath`，前端显示「已按容量清理」而不是转圈。
+3. **关键词搜索的 `%`/`_` 没转义**（`list_records`）：搜「100%」等于搜全部。
+   改成 `LIKE ? ESCAPE '\'` + 模式串转义。
+4. **`update_generation` 静默丢弃白名单外的列**：以后加字段忘了改 `_UPDATE_COLS` 会
+   表现成「写成功但没存」。现在会打 warning。
+5. **`asyncio.CancelledError` 会留下「生成中」死行**：`except Exception` 抓不到它
+   （3.8+ 是 BaseException）。`_generate` 补了专门分支，取消时也把记录收尾成失败。
+
+### 二、能被刷爆 / 白等
+
+6. **`/绘卷 画一张` 没有权限与冷却**：任何群成员都能触发，每次独占生成锁几十秒到几分钟，
+   而调度器遇到锁占用会把到点的那一轮整轮顺延 —— 等于谁都能挤掉定时出图。
+   新增 `manual_draw_admin_only`（默认开）+ `manual_draw_cooldown_sec`（默认 60s，
+   按会话 UMO 记账），控制台「生成服务」页有开关。
+7. **暂停很久后恢复会连续空转 + 刷日志**：四个「跳过」分支（安静时段 / 上一张仍在生成 /
+   每日上限）都是 `advance(cfg, 陈旧的 next_due)`，久停后会在一瞬间连跳上百次、每次都写
+   一条 info。新增纯函数 `scheduler.skip_next()`：一次追到未来（仍按原网格步进，只保留
+   一条日志），`tests/test_scheduler.py` 覆盖。
+8. **控制台每 10 秒做一次全量模板重载 + 两次 ComfyUI 请求**（`/status`）：重载要读 JSON /
+   SQLite；跟随萌绘时还会走 `_load_from_base()`，那个方法内部每次都打「【底模】…」日志，
+   于是用户开着总览页，AstrBot 日志被刷成流水。现在 `/status` 用
+   `templates_for_ui()`（只在从未加载时补一次），探活结果缓存 20 秒
+   （调试页的「测试连接」仍走 `debug_comfy()` 真探）。
+9. **内容寻址去重只在本月生效**：`archive_image` 只看当月目录，上个月的同一张图再抽到会
+   重新落盘。现在先 `glob` 历史月份复用已有文件。
+10. **图库淘汰的扫描成本**：仍是每次成功出图后全量 `rglob`（要算总量才知道有没有超限），
+    没超限会立刻返回。数据量到万张级别再考虑改成 meta 记账式统计，现在不动。
+
+### 三、一致性与小坑
+
+11. **配置布尔强转**：`delivery.caption_on` / `enabled` 用 `bool()`，字符串 `"false"`
+    被当成真（开关形同没有）。`config_coerce.truthy()` 统一收敛，`delivery` / `main` /
+    `scheduler` / `webui_api` 全部改用它（之前每个模块各抄一份，这次删掉重复实现）。
+12. **`ensure_future` 不接住返回值**：asyncio 只持弱引用，task 可能被 GC，异常也无人检索。
+    新增 `plugin.spawn()` 统一记账（`terminate` 时取消），`trigger_manual` 与客户端重建都走它。
+13. **`context.get_using_provider()` 已废弃**（4.28 起标 `@deprecated`），而它每次 `/status`
+    都被调用。`_provider()` 改 async，优先 `get_using_provider_async()`，老版本再退回同步版。
+14. **跟随萌绘时 danbooru 质量词没兜底**：本地库认不出底模仍会补
+    `masterpiece, best quality…`，跟随萌绘却给空串。两边口径统一。
+15. **杂项**：投递名单去重（手改配置重复一行不再重复发）、模板改名后清理不再被引用的
+    旧 JSON（只删这一条留下的那个，绝不批量清用户素材）、缩略图回退时按真实后缀给
+    MIME（不再一律 `image/png`）、`main.py` 顶部补上 `config_coerce` 导入
+    （此前只有 `global` 声明）。
+
+### 前端
+
+- 调度页切换「分钟 / 小时 / 天」时**保持总时长不变**（6 小时 → 0.25 天，除不尽退回分钟）。
+  以前点一下「天」，6 小时直接变成 6 天（8640 分钟）。
+- 「随机浮动」文案 `±N 分钟` → `（+0~N 分钟）`：实现一直只往后加，写 ± 会让人以为会提前。
+- 图库「类别」下拉改用 `stats.by_category`（全量历史），不再只从当前页 24 条里现算。
+- 图库/总览对 `pruned` 记录显示「已按容量清理」，详情里禁止重投（图已不在）。
+
+### 测试
+
+- 新增：`truthy` 7 条（`test_config_coerce`）、`skip_next` 4 条（`test_scheduler`，含久停
+  追平与 daily 落回未来）、跨月去重与淘汰标记 4 条（`test_store`）、新配置键守卫 2 条
+  （`test_schema`，含「手动出图默认仅管理员」）。
+- `tests/` 9 个自检全 PASS。
+
 ## v0.7.6（画风硬锚定：只画动漫不再只是一句空话）
 
 现象：「我虽然设置了全部都用动漫风格，但是提示词里面并没有任何『动漫』相关的字眼，
