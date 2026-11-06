@@ -139,5 +139,39 @@ for orient in ("landscape", "portrait", "square"):
     w, h = prompter.pick_size(prompter.SIZE_PRESETS["qwen"], orient, "中景·横幅", random.Random(1))
     check(f"qwen_pick_{orient}", w % 16 == 0 and h % 16 == 0 and w > 0 and h > 0, f"{w}x{h}")
 
+# ---------- v0.5.1：尺寸跟随构图（每张图不同） ----------
+sdxl = prompter.SIZE_PRESETS["sdxl"]
+check("ratio_by_comp_wide", prompter.composition_ratio("超广角远景·横幅") == 1.78)
+check("ratio_by_comp_portrait", prompter.composition_ratio("全身像·竖幅") == 1.78)
+check("ratio_by_comp_unknown", prompter.composition_ratio("自定义构图") is None)
+check("ratio_by_comp_empty", prompter.composition_ratio("") is None)
+
+w, h = prompter.pick_size(sdxl, "landscape", "超广角远景·横幅", random.Random(3))
+check("size_ultra_wide", (w, h) == (1344, 768), f"{w}x{h}")
+w, h = prompter.pick_size(sdxl, "portrait", "全身像·竖幅", random.Random(3))
+check("size_full_body_tall", (w, h) == (768, 1344), f"{w}x{h}")
+w, h = prompter.pick_size(sdxl, "square", "对称构图·方形", random.Random(3))
+check("size_square", (w, h) == (1024, 1024), f"{w}x{h}")
+
+# 特写/半身像落在 3:4 一档（允许相邻档随机）
+for seed in range(5):
+    w, h = prompter.pick_size(sdxl, "portrait", "特写·竖幅", random.Random(seed))
+    check(f"size_closeup_{seed}", [w, h] in sdxl["portrait"] and abs(max(w, h) / min(w, h) - 1.33) < 0.2,
+          f"{w}x{h}")
+
+# 认不出构图 → 不会越界，仍在白名单内
+for seed in range(5):
+    w, h = prompter.pick_size(sdxl, "landscape", "自定义构图", random.Random(seed))
+    check(f"size_unknown_in_whitelist_{seed}", [w, h] in sdxl["landscape"], f"{w}x{h}")
+
+# 「每张图不同」：不同构图给出不同尺寸（不是永远一个值）
+picked = set()
+for comp, orient in (("超广角远景·横幅", "landscape"), ("中景·横幅", "landscape"),
+                     ("特写·竖幅", "portrait"), ("全身像·竖幅", "portrait"),
+                     ("对称构图·方形", "square")):
+    for seed in range(3):
+        picked.add(prompter.pick_size(sdxl, orient, comp, random.Random(seed)))
+check("size_varies_by_composition", len(picked) >= 3, str(sorted(picked)))
+
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

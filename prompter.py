@@ -319,18 +319,61 @@ def parse_llm_payload(text: str) -> dict:
 # 尺寸落值
 # --------------------------------------------------------------------------- #
 
-_WIDE_HINTS = ("超广角", "俯瞰", "全景")
+# 构图 → 目标长宽比（长边/短边，恒 ≥1）。朝向（横/竖/方）由白名单分组决定，
+# 这里只决定「同一朝向里该挑多宽/多瘦」：超广角要最横，全身像要最瘦高，特写偏 3:4。
+_COMPOSITION_RATIO: tuple = (
+    ("超广角", 1.78),
+    ("全景", 1.65),
+    ("俯瞰", 1.55),
+    ("中景", 1.40),
+    ("全身像", 1.78),
+    ("半身像", 1.33),
+    ("特写", 1.33),
+    ("仰视", 1.50),
+    ("留白", 1.00),
+    ("对称", 1.00),
+)
+
+# 允许「差不到这么多」的候选一起参与随机：既贴合构图，又不至于每张一模一样
+_RATIO_TOLERANCE = 0.10
+
+
+def composition_ratio(composition_name: str) -> "float | None":
+    """构图名 → 目标长宽比；认不出返回 None（调用方保持随机）。"""
+    name = str(composition_name or "")
+    for key, ratio in _COMPOSITION_RATIO:
+        if key in name:
+            return float(ratio)
+    return None
+
+
+def _ratio_of(wh) -> float:
+    w, h = max(1, int(wh[0])), max(1, int(wh[1]))
+    return max(w, h) / min(w, h)
 
 
 def pick_size(
     sizes: dict, orientation: str, composition_name: str, rng: random.Random
 ) -> tuple[int, int]:
-    """按朝向从模板白名单落宽高；超广角/俯瞰/全景类构图取长宽比最极端的一档。"""
+    """按「朝向 + 构图」从模板白名单落宽高 —— 每张图各不相同。
+
+    1. 朝向（横/竖/方）决定取哪一组候选，朝向由当次抽签的构图决定；
+    2. 组内按构图名匹配目标长宽比（超广角/全景/俯瞰偏横，全身像偏瘦高，
+       特写/半身像偏 3:4），选出最接近的若干档随机取一个；
+    3. 构图认不出（自定义词池）→ 组内纯随机。
+    """
     cands = (sizes or {}).get(orientation) or (sizes or {}).get("square") or [[1024, 1024]]
+    cands = [[int(c[0]), int(c[1])] for c in cands if len(c) >= 2]
+    if not cands:
+        return 1024, 1024
     if len(cands) == 1:
-        return int(cands[0][0]), int(cands[0][1])
-    if any(w in str(composition_name or "") for w in _WIDE_HINTS):
-        pick = max(cands, key=lambda wh: int(wh[0]) / max(1, int(wh[1])))
+        return cands[0][0], cands[0][1]
+    target = composition_ratio(composition_name)
+    if target is None:
+        pick = rng.choice(cands)
     else:
-        pick = rng.choice(list(cands))
+        scored = sorted(cands, key=lambda wh: abs(_ratio_of(wh) - target))
+        best = abs(_ratio_of(scored[0]) - target)
+        pool = [wh for wh in scored if abs(_ratio_of(wh) - target) <= best + _RATIO_TOLERANCE]
+        pick = rng.choice(pool)
     return int(pick[0]), int(pick[1])

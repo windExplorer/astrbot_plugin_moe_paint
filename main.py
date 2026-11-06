@@ -51,7 +51,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.5.0",
+    "v0.5.1",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
