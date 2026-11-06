@@ -31,7 +31,7 @@ import {
   status,
   toggleTheme,
 } from "./store";
-import { fmtDue, untilText } from "./utils";
+import { fmtDue, fmtDurationSec, untilText } from "./utils";
 
 const route = useRoute();
 const router = useRouter();
@@ -148,9 +148,17 @@ watch(
                 @update:value="go"
               />
               <div class="sider-foot">
-                <div class="mp-sub">下次生成</div>
-                <div class="due">{{ status?.next_due ? fmtDue(status.next_due) : "未安排" }}</div>
-                <div class="mp-sub">{{ status?.next_due ? untilText(status.next_due) : "等待调度" }}</div>
+                <div class="mp-sub">{{ status?.running ? "正在生成" : "下次生成" }}</div>
+                <div class="due">
+                  {{ status?.running ? fmtDurationSec(status?.running_for_sec) : status?.next_due ? fmtDue(status.next_due) : "未安排" }}
+                </div>
+                <div class="mp-sub">
+                  <template v-if="status?.running">画完自动排下一轮</template>
+                  <template v-else-if="(status?.next_due_overdue_sec || 0) > 60">
+                    计划已过期 {{ fmtDurationSec(status?.next_due_overdue_sec) }}
+                  </template>
+                  <template v-else>{{ status?.next_due ? untilText(status.next_due) : "等待调度" }}</template>
+                </div>
                 <div class="foot-split"></div>
                 <div class="mp-sub">
                   今日 {{ status?.today_success ?? 0 }} 张 · 成功

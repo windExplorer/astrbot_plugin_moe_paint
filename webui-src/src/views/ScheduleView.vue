@@ -20,7 +20,7 @@ import { apiControl } from "../api";
 import { cfgBool, cfgGet, cfgLoaded, cfgNum, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { refreshStatus, status } from "../store";
 import { useAutoRefresh } from "../polling";
-import { fmtDue, joinQuiet, minutesHuman, scheduleSummary, splitQuiet, untilText } from "../utils";
+import { fmtDue, fmtDurationSec, joinQuiet, minutesHuman, scheduleSummary, splitQuiet, untilText } from "../utils";
 
 const message = useMessage();
 
@@ -231,9 +231,17 @@ onMounted(async () => {
     <!-- 现况 -->
     <div class="mp-card now">
       <div class="now-item">
-        <div class="mp-sub">下次生成</div>
-        <div class="now-big">{{ fmtDue(status?.next_due) }}</div>
-        <div class="mp-sub">{{ untilText(status?.next_due) }}</div>
+        <div class="mp-sub">{{ status?.running ? "正在生成" : "下次生成" }}</div>
+        <div class="now-big">
+          {{ status?.running ? fmtDurationSec(status?.running_for_sec) : fmtDue(status?.next_due) }}
+        </div>
+        <div class="mp-sub">
+          <template v-if="status?.running">画完自动排下一轮</template>
+          <template v-else-if="(status?.next_due_overdue_sec || 0) > 60">
+            <span class="overdue">计划已过期 {{ fmtDurationSec(status?.next_due_overdue_sec) }}</span>
+          </template>
+          <template v-else>{{ untilText(status?.next_due) }}</template>
+        </div>
       </div>
       <div class="now-item">
         <div class="mp-sub">今日已画</div>
@@ -463,6 +471,11 @@ onMounted(async () => {
   font-size: 13px;
   font-weight: 600;
   margin: 2px 0;
+}
+
+.overdue {
+  color: var(--mp-warn);
+  font-weight: 700;
 }
 
 .bar {

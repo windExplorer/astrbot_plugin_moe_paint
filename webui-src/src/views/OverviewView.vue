@@ -20,7 +20,7 @@ import {
 } from "../api";
 import { refreshStats, refreshStatus, stats, status, successRate } from "../store";
 import { useAutoRefresh } from "../polling";
-import { fmtDue, fmtTs, parseBrief, scheduleSummary, untilText } from "../utils";
+import { fmtDue, fmtDurationSec, fmtTs, parseBrief, scheduleSummary, untilText } from "../utils";
 
 const message = useMessage();
 const router = useRouter();
@@ -147,10 +147,18 @@ onMounted(refreshAll);
           </n-button>
         </div>
       </div>
-      <div class="hero-next">
-        <div class="next-label">下次生成</div>
-        <div class="next-time">{{ fmtDue(status?.next_due) }}</div>
-        <div class="next-until">{{ untilText(status?.next_due) }}</div>
+      <div class="hero-next" :class="{ busy: status?.running }">
+        <div class="next-label">{{ status?.running ? "正在生成" : "下次生成" }}</div>
+        <div class="next-time">
+          {{ status?.running ? fmtDurationSec(status?.running_for_sec) : fmtDue(status?.next_due) }}
+        </div>
+        <div class="next-until">
+          <template v-if="status?.running">画完会自动排下一轮</template>
+          <span v-else-if="(status?.next_due_overdue_sec || 0) > 60" class="warn">
+            计划已过期 {{ fmtDurationSec(status?.next_due_overdue_sec) }}，调度可能卡住（看「调试与日志」）
+          </span>
+          <template v-else>{{ untilText(status?.next_due) }}</template>
+        </div>
         <div class="next-split"></div>
         <div class="next-note">{{ status?.last_run_note || "还没有跑过" }}</div>
       </div>
@@ -373,6 +381,26 @@ onMounted(refreshAll);
   height: 1px;
   background: rgba(255, 255, 255, 0.28);
   margin: 10px 0 8px;
+}
+
+.hero-next.busy {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+  animation: heroPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes heroPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.32);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.55);
+  }
+}
+
+.hero-next .warn {
+  font-weight: 700;
+  color: #ffe6b8;
 }
 
 .next-note {

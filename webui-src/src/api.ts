@@ -164,6 +164,13 @@ export interface StatusPayload {
   auto_paused: boolean;
   consecutive_failures: number;
   next_due: string | null;
+  /** 是否正在生成（生成期间 next_due 仍是过期值，别拿它当「下次」显示） */
+  running?: boolean;
+  running_since?: string | null;
+  running_for_sec?: number;
+  running_note?: string;
+  /** 计划已过期多少秒但没在生成（>60 说明调度可能卡住） */
+  next_due_overdue_sec?: number;
   last_run_note: string;
   last_run_ts: number;
   mode: string;

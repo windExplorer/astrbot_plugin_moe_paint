@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.0",
+    "v0.7.1",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -879,7 +879,15 @@ class MoePaintPlugin(Star):
         if self._gen_lock.locked():
             return {"ok": False, "skipped": True, "error": "已有生成在进行", "id": 0}
         async with self._gen_lock:
-            return await self._generate(reason=reason, theme=theme, event=event)
+            # 标记「正在生成」：调度循环在出图期间不会推进 next_due，UI 靠这个区分
+            # 「正在画」与「卡住了」。放在 finally 里，取消/异常都不会留下假状态。
+            self.sched.running_since = datetime.now()
+            self.sched.running_note = str(reason or "")[:40]
+            try:
+                return await self._generate(reason=reason, theme=theme, event=event)
+            finally:
+                self.sched.running_since = None
+                self.sched.running_note = ""
 
     async def _generate(self, reason: str, theme: str, event) -> dict:
         t0 = time.monotonic()

@@ -23,6 +23,9 @@ PAUSE_AFTER_FAILURES = 3
 # 远程队列拥塞时的顺延间隔（秒）：先让路给萌绘的交互出图，5 分钟后再试
 DEFER_WAIT_SECONDS = 300
 
+# 单轮生成的总硬超时（秒）：内部各环节都有自己的预算，这层是防「彻底卡死」的兜底
+GEN_TIMEOUT_SECONDS = 1800
+
 REASON_QUIET = "quiet"
 REASON_BUSY = "busy"
 REASON_DISABLED = "disabled"
@@ -35,6 +38,15 @@ class ScheduleState:
     auto_paused: bool = False
     last_run_note: str = ""
     last_run_ts: int = 0
+    # 正在生成（v0.7.1）：next_due 在出图期间仍是「已过期」的旧值，
+    # UI 必须靠这两个字段区分「正在画」和「调度卡住」。
+    running_since: "datetime | None" = None
+    running_note: str = ""
+
+    def running_for_sec(self) -> int:
+        if self.running_since is None:
+            return 0
+        return max(0, int((datetime.now() - self.running_since).total_seconds()))
 
 
 # --------------------------------------------------------------------------- #
@@ -265,7 +277,21 @@ async def run_loop(plugin) -> None:
                         )
                         logger.info(f"[萌萌绘卷] {state.last_run_note}")
                         continue
-                summary = await plugin.generate_one(reason="schedule")
+                # 立刻把「正在生成」摆到状态里：出图可能要几分钟，期间 next_due
+                # 还是旧的（已过期），不写这句话 UI 就会一直显示「下次生成 15:40」。
+                state.last_run_note = f"正在生成（{now.strftime('%H:%M')} 开始）"
+                logger.info(f"[萌萌绘卷] 到点开始生成（计划 {now.strftime('%m-%d %H:%M')}）")
+                try:
+                    summary = await asyncio.wait_for(
+                        plugin.generate_one(reason="schedule"), timeout=GEN_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # 内部各环节都有预算，走到这里说明整个管线被卡死了（网络/中转站）
+                    summary = {
+                        "ok": False,
+                        "error": f"生成超时：超过 {GEN_TIMEOUT_SECONDS // 60} 分钟未完成，已放弃本轮",
+                    }
+                    logger.error(f"[萌萌绘卷] {summary['error']}")
                 state.last_run_ts = int(now.timestamp())
                 if summary.get("skipped"):
                     state.last_run_note = "生成被跳过（占用/无模板）"

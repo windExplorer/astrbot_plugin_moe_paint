@@ -1,5 +1,49 @@
 # 更新日志
 
+## v0.7.1（修「下次生成 15:40」卡着不动：出图期间显示正在生成 + 30 分钟硬超时）
+
+现象：15:43 时页面仍显示「下次生成 15:40」，过了几分钟一动不动，也没有任何「正在画」的提示。
+
+根因：调度循环的 `next_due` **要等整轮生成结束才推进**
+
+```python
+summary = await plugin.generate_one(reason="schedule")   # ← 出图期间卡在这里
+...
+state.next_due = advance(cfg, datetime.now(), rng)       # ← 才更新
+```
+
+而一轮生成包含 LLM、ComfyUI 排队、等待预算（`draw_timeout + 队列 × 60s`，封顶
+`hard_cap`，默认 600s）与下载，几分钟很正常。这段时间里：
+
+- `next_due` 还停在过去的 15:40；
+- `last_run_note` 也只在结束后才写；
+- `/status` 里没有任何「正在生成」字段。
+
+于是 UI 只能把过期时间反复展示，看起来就是卡死。v0.7.0 加的 15 秒自动刷新反而让它更明显
+（一直在刷同一个过期值）。
+
+### 修复
+
+- `ScheduleState` 新增 `running_since` / `running_note` 与 `running_for_sec()`；
+  `generate_one` 在 `finally` 里清理（取消/异常都不会留下假状态），
+  因此**定时、指令、WebUI 手动触发都算**。
+- 调度循环到点后先把 `last_run_note` 写成「正在生成（15:40 开始）」，再执行生成。
+- `/status` 新增 `running` / `running_since` / `running_for_sec` / `running_note` /
+  `next_due_overdue_sec`，`last_run_note` 在生成中自动换成「正在生成（… 开始，已 N 分钟）」。
+- 控制台三处（总览卷首卡、调度页「现在」卡、左侧栏）在生成中改为显示
+  「正在生成 · 已 3 分 12 秒」，并提示「画完会自动排下一轮」；
+  顶部状态标签在生成中显示「生成中…」。
+- 若 `next_due` 已过期超过 60 秒却**没有**在生成 → 明确警示
+  「计划已过期 X，调度可能卡住（看『调试与日志』）」，不再默默展示过期时间。
+- 兜底：单轮生成加 30 分钟总硬超时（`GEN_TIMEOUT_SECONDS = 1800`），
+  超时按失败收尾（写「生成超时：超过 30 分钟未完成，已放弃本轮」），
+  下一轮照常排，避免任何环节被彻底拖死。
+
+### 测试
+
+- `tests/test_scheduler.py` 增补 3 条：`running_since` 默认空、`running_for_sec()` 计算、
+  硬超时常量存在且 ≥600s。
+
 ## v0.7.0（实时刷新 + 失败理由不再空白 + 图库全屏看大图）
 
 三条体验问题（用户反馈）：日志/图库/任务要手动点刷新；有些失败记录的错误理由是空的；

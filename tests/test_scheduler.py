@@ -113,5 +113,15 @@ check("queue_busy_unknown", scheduler.queue_too_busy(-1, 2) is False)  # 查询�
 check("queue_busy_bad_ahead", scheduler.queue_too_busy("x", 2) is False)
 check("queue_busy_none_threshold", scheduler.queue_too_busy(5, None) is False)
 
+# ---------- v0.7.1：生成中状态（UI 靠它区分「正在画」与「卡住」） ----------
+from datetime import datetime, timedelta  # noqa: E402
+
+st = scheduler.ScheduleState()
+check("running_default", st.running_since is None and st.running_for_sec() == 0)
+st.running_since = datetime.now() - timedelta(seconds=125)
+elapsed = st.running_for_sec()
+check("running_for_sec", 124 <= elapsed <= 127, str(elapsed))
+check("gen_timeout_defined", scheduler.GEN_TIMEOUT_SECONDS >= 600, str(scheduler.GEN_TIMEOUT_SECONDS))
+
 print("scheduler:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

@@ -51,6 +51,7 @@ export async function refreshStats(): Promise<void> {
 export const schedTag = computed(() => {
   const s = status.value;
   if (!s) return { text: "读取中…", type: "default" as const };
+  if (s.running) return { text: "生成中…", type: "info" as const };
   if (!s.enabled) return { text: "总开关关闭", type: "default" as const };
   if (s.auto_paused) return { text: "失败自动暂停", type: "error" as const };
   if (s.paused_manual) return { text: "已暂停", type: "warning" as const };

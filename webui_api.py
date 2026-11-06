@@ -10,6 +10,7 @@
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import logger
@@ -107,13 +108,26 @@ async def h_status(plugin) -> dict:
     scfg = plugin._schedule_cfg()
     anima = plugin.anima_info()
     acfg = plugin._sub("anima")
+    # 生成期间 next_due 仍是「已过期」的旧值：必须靠 running 区分「正在画」和「卡住」
+    running = sched.running_since is not None
+    overdue = 0
+    if sched.next_due is not None and not running:
+        overdue = max(0, int((datetime.now() - sched.next_due).total_seconds()))
+    last_note = sched.last_run_note
+    if running and sched.running_since is not None:
+        last_note = f"正在生成（{sched.running_since.strftime('%H:%M')} 开始，已 {sched.running_for_sec() // 60} 分钟）"
     return ok({
         "enabled": bool(plugin._cfg().get("enabled", True)),
         "paused_manual": bool(scfg.get("paused_manual", False)),
         "auto_paused": bool(sched.auto_paused),
         "consecutive_failures": int(sched.consecutive_failures),
         "next_due": sched.next_due.strftime("%Y-%m-%d %H:%M:%S") if sched.next_due else None,
-        "last_run_note": sched.last_run_note,
+        "running": running,
+        "running_since": sched.running_since.strftime("%Y-%m-%d %H:%M:%S") if running else None,
+        "running_for_sec": sched.running_for_sec(),
+        "running_note": sched.running_note if running else "",
+        "next_due_overdue_sec": overdue,
+        "last_run_note": last_note,
         "last_run_ts": sched.last_run_ts,
         "mode": str(scfg.get("mode") or "interval"),
         "interval_minutes": scfg.get("interval_minutes"),

@@ -87,6 +87,16 @@ export function parseDue(text: string | null | undefined): Date | null {
   );
 }
 
+/** 秒 → 「3 分 12 秒」/「12 秒」/「1 小时 5 分」。 */
+export function fmtDurationSec(sec: number | null | undefined): string {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分 ${s % 60} 秒`;
+  const h = Math.floor(m / 60);
+  return `${h} 小时 ${m % 60} 分`;
+}
+
 export function untilText(iso: string | null | undefined): string {
   const d = parseDue(iso);
   if (!d) return "未安排";
