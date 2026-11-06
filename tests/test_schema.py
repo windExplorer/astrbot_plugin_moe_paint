@@ -99,6 +99,8 @@ def main() -> int:
         ("workflow_source",),
         ("delivery", "sessions"),
         ("gallery", "max_total_mb"),
+        ("theme", "category_weights"),
+        ("theme", "disabled_categories"),
         ("workflow_templates",),
     ]
     def has_path(path: tuple) -> bool:

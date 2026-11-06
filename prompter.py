@@ -35,6 +35,22 @@ CATEGORIES: dict[str, list[str]] = {
         "灯下修理发条的机械少女", "泳池边晒太阳的少女", "图书馆书架间找书的少女",
         "夜色摩天轮上的双马尾少女",
     ],
+    # v0.6.0：把「少女」拆成二次元与真人两条线，权重可分别调（动漫多一点、真人少一点）
+    "动漫少女": [
+        "樱花树下回眸的少女与飘落花瓣", "雨夜霓虹街角撑着透明伞的少女",
+        "夏日祭典穿浴衣仰望烟花的少女", "车站月台上抱着纸袋等车的少女",
+        "教室窗边被午后阳光照亮的少女", "天台边缘张开双臂迎风的少女",
+        "冬日暖炉边织围巾的少女", "星空下躺在草地上的少女",
+        "图书馆梯子上取书的少女", "海边堤坝上被风吹起裙摆的少女",
+        "秋日银杏道上骑单车的少女", "清晨厨房里系围裙煎蛋的少女",
+    ],
+    "真人少女": [
+        "清晨窗边自然光的素颜写真", "咖啡馆里低头看手机的侧脸特写",
+        "街头抓拍的走路瞬间", "海边黄昏的逆光侧影",
+        "图书馆书架间的安静半身像", "雨天玻璃窗后的少女",
+        "居家白衬衫的慵懒午后", "天台栏杆边的城市背景人像",
+        "秋日公园长椅上的毛衣少女", "夜晚便利店门口的霓虹光人像",
+    ],
     "人物肖像": [
         "老画师沾满颜料的手与画笔", "爵士酒吧里的萨克斯手", "图书管理员与高耸书架",
         "舞台幕后候场的舞者", "老船长望着雾中的港口", "街头棋摊的两位老人",
@@ -58,6 +74,34 @@ STYLES: list[str] = [
     "胶片摄影颗粒感", "极简扁平插画", "浮世绘色块", "暗调油画", "蒸汽波霓虹",
     "水墨晕染", "皮克斯式 3D 质感", "动态漫画分镜感",
 ]
+
+# 按类别收窄风格池：动漫题材别抽到「胶片颗粒感」，真人写真别抽到「赛璐璐动画风」。
+# 不在表里的类别（含用户自定义类别）用全局 STYLES。
+STYLES_ANIME: list[str] = [
+    "赛璐璐动画风", "厚涂插画", "水彩淡彩", "新海诚式光影", "吉卜力式温暖",
+    "浮世绘色块", "皮克斯式 3D 质感", "动态漫画分镜感",
+]
+STYLES_PHOTO: list[str] = [
+    "胶片摄影颗粒感", "自然光人像摄影", "电影感浅景深", "柔焦逆光写真",
+    "窗边柔光写真",
+]
+
+CATEGORY_STYLE_GROUP: dict[str, str] = {
+    "美少女": "anime",
+    "动漫少女": "anime",
+    "真人少女": "photo",
+    "人物肖像": "photo",
+}
+
+
+def style_pool_for(category: str) -> list:
+    """类别 → 风格池（anime / photo / 全局）。"""
+    group = CATEGORY_STYLE_GROUP.get(str(category or ""))
+    if group == "anime":
+        return STYLES_ANIME
+    if group == "photo":
+        return STYLES_PHOTO
+    return STYLES
 
 # 构图层：每项带朝向（orientation 是尺寸白名单的键，LLM 不参与决定）
 COMPOSITIONS: list[tuple[str, str]] = [
@@ -140,10 +184,73 @@ def _merge_words(default: list, extra: str | None) -> list:
     return default + [w for w in extra_items if w]
 
 
+# 默认类别权重：少女题材占大头（动漫:真人 ≈ 3:1），其余类别各 1 保底多样性。
+# 用户可在「主题词池」页改成任意「类别=权重」。
+DEFAULT_CATEGORY_WEIGHTS = (
+    "美少女=5,动漫少女=4,真人少女=3,人物肖像=1,风景场景=1,宇宙星空=1,艺术创意=1,自然生态=1"
+)
+
+
+def parse_weights(raw) -> dict:
+    """解析「类别=权重」文本（或字典）；非法项丢弃，负值归零，上限 100。"""
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        items = []
+        for part in re.split(r"[,，;；\n\r]+", str(raw or "")):
+            if not part.strip():
+                continue
+            name, sep, val = part.partition("=")
+            if not sep:
+                name, sep, val = part.partition("：")
+            if not sep:
+                name, sep, val = part.partition(":")
+            items.append((name, val))
+    out: dict[str, float] = {}
+    for name, val in items:
+        key = str(name).strip()
+        if not key:
+            continue
+        try:
+            w = float(str(val).strip())
+        except (TypeError, ValueError):
+            continue
+        out[key] = min(100.0, max(0.0, w))
+    return out
+
+
+def weighted_choice(rng: random.Random, keys: list, weights: dict) -> str:
+    """按权重抽一个键；没配置 / 全为 0 → 退回均匀随机（绝不抽不出）。"""
+    pairs = [(k, float(weights.get(k, 1.0))) for k in keys]
+    pairs = [(k, w) for k, w in pairs if w > 0]
+    if not pairs:
+        return rng.choice(list(keys))
+    total = sum(w for _, w in pairs)
+    r = rng.random() * total
+    acc = 0.0
+    for k, w in pairs:
+        acc += w
+        if r <= acc:
+            return k
+    return pairs[-1][0]
+
+
+def category_distribution(categories: list, weights: dict) -> list:
+    """给 UI 用：[{name, weight, pct}]，权重缺省为 1，全 0 时按均匀算。"""
+    pairs = [(str(c), float((weights or {}).get(c, 1.0))) for c in categories]
+    pairs = [(c, w) for c, w in pairs if w > 0]
+    total = sum(w for _, w in pairs) or 1.0
+    return [
+        {"name": c, "weight": w, "pct": round(w / total * 100, 1)}
+        for c, w in pairs
+    ]
+
+
 def draw_brief(
     rng: random.Random,
     disabled_categories: set[str] | None = None,
     extra: dict | None = None,
+    weights: dict | None = None,
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -152,9 +259,11 @@ def draw_brief(
     - 其他键 → 新类别名，值为逗号分隔的题材；
     - 「风格」「光色」「氛围」→ 追加对应层的词；
     - 「构图」→ 追加构图项，格式「名称@landscape|portrait|square」。
+    weights（配置 theme.category_weights）：类别 → 权重，缺省 1.0；停用的类别无论如何都不抽。
     """
     extra = extra or {}
     disabled = disabled_categories or set()
+    weights = weights or {}
 
     # 类别池：内置 + extra 新类别，跳过停用
     cat_pool: dict[str, list[str]] = {}
@@ -174,9 +283,9 @@ def draw_brief(
     if not cat_pool:
         cat_pool = dict(CATEGORIES)
 
-    category = rng.choice(sorted(cat_pool.keys()))
+    category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
     subject = rng.choice(cat_pool[category])
-    style = rng.choice(_merge_words(STYLES, extra.get("风格")))
+    style = rng.choice(_merge_words(style_pool_for(category), extra.get("风格")))
     light = rng.choice(_merge_words(LIGHTS, extra.get("光色")))
     mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
 

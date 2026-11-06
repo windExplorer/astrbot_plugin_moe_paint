@@ -147,6 +147,35 @@ export function splitNames(raw: any): string[] {
   return out;
 }
 
+/** 解析「类别=权重」文本（与后端 prompter.parse_weights 同语义）。 */
+export function parseWeights(raw: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  const text = typeof raw === "string" ? raw : "";
+  for (const part of text.split(/[,，;；\n\r]+/)) {
+    if (!part.trim()) continue;
+    const m = part.match(/^\s*([^=：:]+)\s*[=：:]\s*(.+?)\s*$/);
+    if (!m) continue;
+    const w = Number(m[2]);
+    if (!Number.isFinite(w)) continue;
+    out[m[1].trim()] = Math.min(100, Math.max(0, w));
+  }
+  return out;
+}
+
+/** 各类别在当前权重下的占比（缺省 1；全 0 时按均匀）。 */
+export function weightDistribution(
+  names: string[],
+  weights: Record<string, number>,
+): { name: string; pct: number }[] {
+  const pairs = names.map((n) => [n, weights[n] === undefined ? 1 : Number(weights[n])] as [string, number]);
+  const live = pairs.filter(([, w]) => w > 0);
+  const list = live.length ? live : pairs;
+  const total = list.reduce((s, [, w]) => s + w, 0) || 1;
+  return list
+    .map(([name, w]) => ({ name, pct: Math.round((w / total) * 1000) / 10 }))
+    .sort((a, b) => b.pct - a.pct);
+}
+
 export function copyText(text: string, label: string, done?: (msg: string) => void): void {
   if (!text) return;
   const ok = (m: string) => done?.(m);

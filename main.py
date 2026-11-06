@@ -51,7 +51,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.5.2",
+    "v0.6.0",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -649,6 +649,7 @@ class MoePaintPlugin(Star):
                 _PICK_RANDOM,
                 disabled_categories=self._disabled_categories(),
                 extra=self._theme_extra(),
+                weights=self._category_weights(),
             )
             if str(theme or "").strip():
                 brief["category"] = "自定义"
@@ -892,6 +893,7 @@ class MoePaintPlugin(Star):
                 _PICK_RANDOM,
                 disabled_categories=self._disabled_categories(),
                 extra=self._theme_extra(),
+                weights=self._category_weights(),
             )
             if theme.strip():
                 brief["category"] = "自定义"
@@ -1035,6 +1037,15 @@ class MoePaintPlugin(Star):
     def _disabled_categories(self) -> set:
         raw = str(self._sub("theme").get("disabled_categories") or "")
         return {w.strip() for w in raw.replace("，", ",").split(",") if w.strip()}
+
+    def _category_weights(self) -> dict:
+        """类别权重（theme.category_weights，格式「类别=权重」）；没配 = 均匀。"""
+        raw = self._sub("theme").get("category_weights")
+        try:
+            return prompter.parse_weights(raw)
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 类别权重解析失败（按均匀抽签）: {e}")
+            return {}
 
     def _theme_extra(self) -> dict:
         raw = self._sub("theme").get("extra_words")

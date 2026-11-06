@@ -46,6 +46,7 @@ export const KNOWN_KEYS = new Set<string>([
   "workflow_templates",
   "theme.disabled_categories",
   "theme.extra_words",
+  "theme.category_weights",
   "delivery.sessions",
   "delivery.caption_on",
   "delivery.caption_template",

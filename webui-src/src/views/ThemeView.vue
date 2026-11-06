@@ -1,14 +1,18 @@
 <script setup lang="ts">
-// 主题词池：停用类别 + 词池扩充。
-// 内置 6 大类；extra_words 的键可以是内置类别（追加题材）、新类别，
-// 或「风格 / 光色 / 氛围 / 构图」这几个特殊层。
+// 主题词池：类别权重 + 停用类别 + 词池扩充。
+// 内置 9 大类（少女拆成动漫/真人两线）；extra_words 的键可以是内置类别（追加题材）、
+// 新类别，或「风格 / 光色 / 氛围 / 构图」这几个特殊层。
 import { computed, onMounted } from "vue";
 import { NButton, NInput, NSelect, useMessage } from "naive-ui";
 import { cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
+import { parseWeights, weightDistribution } from "../utils";
 
 const message = useMessage();
 
-const BUILTIN = ["风景场景", "宇宙星空", "美少女", "人物肖像", "艺术创意", "自然生态"];
+const BUILTIN = [
+  "美少女", "动漫少女", "真人少女", "人物肖像",
+  "风景场景", "宇宙星空", "艺术创意", "自然生态",
+];
 
 const extraMap = computed<Record<string, string>>(() => {
   const v = cfgGet("theme.extra_words", {});
@@ -55,8 +59,41 @@ const layerKeys = computed(() =>
   Object.keys(extraMap.value).filter((k) => ["风格", "光色", "氛围", "构图"].includes(k)),
 );
 
+// ---------------- 类别权重 ----------------
+
+const weightsText = computed({
+  get: () => String(cfgGet("theme.category_weights", "")),
+  set: (s: string) => cfgSet("theme.category_weights", s),
+});
+
+/** 实际参与抽签的类别（排除停用的），用于算占比 */
+const activeCategories = computed(() =>
+  categoryOptions.value.map((o) => o.value).filter((n) => !disabled.value.includes(n)),
+);
+
+const distribution = computed(() =>
+  weightDistribution(activeCategories.value, parseWeights(weightsText.value)),
+);
+
+const girlPct = computed(() => {
+  const girl = distribution.value
+    .filter((d) => ["美少女", "动漫少女", "真人少女"].includes(d.name))
+    .reduce((s, d) => s + d.pct, 0);
+  return Math.round(girl * 10) / 10;
+});
+
+function applyPreset(kind: "girl" | "balanced") {
+  weightsText.value =
+    kind === "girl"
+      ? "美少女=5,动漫少女=4,真人少女=3,人物肖像=1,风景场景=1,宇宙星空=1,艺术创意=1,自然生态=1"
+      : "美少女=2,动漫少女=2,真人少女=1,人物肖像=1,风景场景=2,宇宙星空=2,艺术创意=1,自然生态=1";
+}
+
 async function save() {
-  const r = await saveFields(["theme.disabled_categories", "theme.extra_words"], "主题词池");
+  const r = await saveFields(
+    ["theme.disabled_categories", "theme.extra_words", "theme.category_weights"],
+    "主题词池",
+  );
   if (r.ok) message.success(`主题词池已保存（${r.changed} 项），下一张起生效`);
   else message.error(`保存失败：${r.error}`);
 }
@@ -66,6 +103,43 @@ onMounted(loadConfig);
 
 <template>
   <div class="page">
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">类别权重</div>
+        <div class="mp-row">
+          <n-button size="small" quaternary @click="applyPreset('girl')">少女向预设</n-button>
+          <n-button size="small" quaternary @click="applyPreset('balanced')">均衡预设</n-button>
+          <n-button size="small" type="primary" :loading="!!saving['主题词池']" @click="save">保存</n-button>
+        </div>
+      </div>
+
+      <div class="mp-hint" style="margin-bottom: 10px">
+        每行/逗号分隔一条 <code class="mp-mono">类别=权重</code>，权重越大越常被抽到；
+        没写到的类别按 1 算，写 0 等于不抽。停用的类别即使有权重也不会抽。
+      </div>
+
+      <n-input
+        v-model:value="weightsText"
+        type="textarea"
+        :rows="3"
+        size="small"
+        class="mp-mono"
+        placeholder="美少女=5,动漫少女=4,真人少女=3,人物肖像=1"
+      />
+
+      <div class="dist">
+        <div class="dist-head">
+          <span class="mp-sub">当前分布（少女题材合计 {{ girlPct }}%）</span>
+        </div>
+        <div v-for="d in distribution" :key="d.name" class="dist-row">
+          <span class="dist-name">{{ d.name }}</span>
+          <div class="dist-bar"><i :style="{ width: d.pct + '%' }"></i></div>
+          <span class="dist-pct mp-mono">{{ d.pct }}%</span>
+        </div>
+        <div v-if="!distribution.length" class="mp-sub">没有可抽的类别（都被停用了？）</div>
+      </div>
+    </div>
+
     <div class="mp-card">
       <div class="mp-card-head">
         <div class="mp-card-title">停用类别</div>
@@ -134,6 +208,51 @@ onMounted(loadConfig);
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 10px;
+}
+
+.dist {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dist-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.dist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.dist-name {
+  flex: 0 0 78px;
+}
+
+.dist-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--mp-line);
+  overflow: hidden;
+}
+
+.dist-bar i {
+  display: block;
+  height: 100%;
+  background: var(--mp-grad);
+  border-radius: 4px;
+}
+
+.dist-pct {
+  flex: 0 0 48px;
+  text-align: right;
+  color: var(--mp-sub);
 }
 
 .mp-tag {

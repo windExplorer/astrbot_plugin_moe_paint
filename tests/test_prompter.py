@@ -173,5 +173,63 @@ for comp, orient in (("超广角远景·横幅", "landscape"), ("中景·横幅"
         picked.add(prompter.pick_size(sdxl, orient, comp, random.Random(seed)))
 check("size_varies_by_composition", len(picked) >= 3, str(sorted(picked)))
 
+# ---------- v0.6.0：类别权重 + 少女双线 + 风格池 ----------
+check("cat_anime_girl", "动漫少女" in prompter.CATEGORIES)
+check("cat_real_girl", "真人少女" in prompter.CATEGORIES)
+check("cat_girl_subjects", all(len(prompter.CATEGORIES[k]) >= 8 for k in ("美少女", "动漫少女", "真人少女")))
+
+w = prompter.parse_weights("美少女=5,动漫少女=4，真人少女=3;人物肖像=1")
+check("parse_weights_multi", w == {"美少女": 5.0, "动漫少女": 4.0, "真人少女": 3.0, "人物肖像": 1.0}, str(w))
+check("parse_weights_empty", prompter.parse_weights("") == {})
+check("parse_weights_garbage", prompter.parse_weights("乱写一堆") == {})
+check("parse_weights_negative", prompter.parse_weights("a=-2")["a"] == 0)
+check("parse_weights_dict", prompter.parse_weights({"a": 2})["a"] == 2)
+check("parse_weights_cap", prompter.parse_weights("a=999")["a"] == 100)
+
+wts = prompter.parse_weights(prompter.DEFAULT_CATEGORY_WEIGHTS)
+rngw = random.Random(7)
+cnt: dict = {}
+N = 800
+for _ in range(N):
+    c = prompter.draw_brief(rngw, weights=wts)["category"]
+    cnt[c] = cnt.get(c, 0) + 1
+girl = cnt.get("美少女", 0) + cnt.get("动漫少女", 0) + cnt.get("真人少女", 0)
+anime = cnt.get("美少女", 0) + cnt.get("动漫少女", 0)
+real = cnt.get("真人少女", 0)
+check("weight_girl_dominant", girl / N > 0.6, f"{girl / N:.2f} {cnt}")
+check("weight_anime_gt_real", anime > real * 2, f"anime={anime} real={real}")
+check("weight_others_kept", any(cnt.get(k, 0) > 0 for k in ("风景场景", "宇宙星空", "艺术创意", "自然生态")), str(cnt))
+
+all_zero = {k: 0 for k in prompter.CATEGORIES}
+b = prompter.draw_brief(random.Random(1), weights=all_zero)
+check("weight_all_zero_fallback", b["category"] in prompter.CATEGORIES, b["category"])
+
+bad = b
+for seed in range(50):
+    bad = prompter.draw_brief(random.Random(seed), weights={"风景场景": 99}, disabled_categories={"风景场景"})
+    if bad["category"] == "风景场景":
+        break
+check("weight_disabled_excluded", bad["category"] != "风景场景", bad["category"])
+
+seen = set()
+for seed in range(200):
+    ws = {k: (0 if k == "自然生态" else 1) for k in prompter.CATEGORIES}
+    seen.add(prompter.draw_brief(random.Random(seed), weights=ws)["category"])
+check("weight_zero_excluded", "自然生态" not in seen, str(sorted(seen)))
+
+only_anime = {k: (1 if k == "动漫少女" else 0) for k in prompter.CATEGORIES}
+only_real = {k: (1 if k == "真人少女" else 0) for k in prompter.CATEGORIES}
+ok_anime = all(prompter.draw_brief(random.Random(s), weights=only_anime)["style"] in prompter.STYLES_ANIME
+               for s in range(60))
+ok_real = all(prompter.draw_brief(random.Random(s), weights=only_real)["style"] in prompter.STYLES_PHOTO
+              for s in range(60))
+check("style_anime_pool", ok_anime)
+check("style_photo_pool", ok_real)
+check("style_pool_fallback_global", prompter.style_pool_for("自定义类别") is prompter.STYLES)
+
+dist = prompter.category_distribution(["a", "b"], {"a": 3, "b": 1})
+check("distribution_pct", dist[0] == {"name": "a", "weight": 3.0, "pct": 75.0}, str(dist))
+check("distribution_empty", prompter.category_distribution([], {}) == [])
+
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)
