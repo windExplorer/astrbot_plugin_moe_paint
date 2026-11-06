@@ -84,5 +84,72 @@ with tempfile.TemporaryDirectory() as td:
     )
     check("load_missing_flagged", len(loaded2) == 1 and not loaded2[0].ok and "不存在" in loaded2[0].problem)
 
+# ---------- v0.4.0：上传解析 / analyze / 跟随尺寸 ----------
+api_text = json.dumps(wf, ensure_ascii=False)
+parsed, perrs = workflow_mgr.parse_upload(api_text)
+check("parse_api_ok", parsed is not None and not perrs, str(perrs))
+check("parse_api_nodes", parsed is not None and len(parsed) == len(wf))
+
+ui_text = json.dumps({"last_node_id": 9, "nodes": [{"id": 1}], "links": []})
+_, uerr = workflow_mgr.parse_upload(ui_text)
+check("parse_ui_rejected", not _ and any("界面格式" in e for e in uerr), str(uerr))
+
+_, jerr = workflow_mgr.parse_upload("{not json")
+check("parse_bad_json", any("JSON 解析失败" in e for e in jerr), str(jerr))
+
+_, merr = workflow_mgr.parse_upload(json.dumps({"1": {"inputs": {}}}))
+check("parse_missing_class_type", any("class_type" in e for e in merr), str(merr))
+
+# /history 导出的 {prompt: {...}} 包一层也能认
+wrapped, werr = workflow_mgr.parse_upload(json.dumps({"prompt": wf, "client_id": "x"}))
+check("parse_unwrap_prompt", wrapped is not None and not werr, str(werr))
+
+ana = workflow_mgr.analyze(wf)
+check("analyze_model", ana["model_file"] == "anima-turbo-v1.0.safetensors", ana.get("model_file", ""))
+check("analyze_save", ana["save"] == "8" and "SaveImage" in ana["save_class"], ana.get("save_class", ""))
+check("analyze_latent", ana["latent_class"] == "EmptyLatentImage")
+check("analyze_default_wh", (ana["default_width"], ana["default_height"]) == (1216, 832),
+      f'{ana["default_width"]}x{ana["default_height"]}')
+check("analyze_kind", ana["kind"] == "t2i")
+check("analyze_no_problems", not ana["problems"], str(ana["problems"]))
+
+# 图生图链路（latent 无 width/height）拒绝入库
+img2img = {
+    "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+    "2": {"class_type": "VAEEncode", "inputs": {"pixels": ["1", 0], "vae": ["9", 0]}},
+    "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "x"}},
+    "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "y"}},
+    "5": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["3", 0],
+                                               "negative": ["4", 0], "latent_image": ["2", 0]}},
+}
+ai = workflow_mgr.analyze(img2img)
+check("analyze_img2img_flagged", ai["kind"] == "img2img" and any("暂不支持" in p for p in ai["problems"]),
+      str(ai["problems"]))
+
+fs = workflow_mgr.follow_sizes(1344, 768)
+check("follow_sizes_landscape", fs["landscape"] == [[1344, 768]], str(fs))
+check("follow_sizes_portrait_swap", fs["portrait"] == [[768, 1344]], str(fs))
+check("follow_sizes_square", fs["square"] == [[768, 768]], str(fs))
+check("follow_sizes_bad", workflow_mgr.follow_sizes(0, 0).get("landscape") == [[1216, 832], [1152, 896], [1344, 768]])
+fs2 = workflow_mgr.follow_sizes(832, 1216)
+check("follow_sizes_vertical_input", fs2["landscape"] == [[1216, 832]], str(fs2))
+
+# ---------- 入库：落盘 + 同名覆盖 ----------
+with tempfile.TemporaryDirectory() as td:
+    wf_dir = Path(td) / "workflows"
+    fname = workflow_mgr.save_workflow_file(wf_dir, "anima 默认/v2", wf)
+    check("save_file_sanitized", fname == "anima_默认_v2.json" and (wf_dir / fname).is_file(), fname)
+    back = json.loads((wf_dir / fname).read_text(encoding="utf-8"))
+    check("save_file_roundtrip", back["3"]["inputs"]["text"] == "1girl")
+
+    entries, replaced = workflow_mgr.upsert_entry(
+        [{"name": "a", "file": "a.json", "tag_style": "danbooru"}],
+        {"name": "a", "file": "a2.json", "size_preset": "flux"},
+    )
+    check("upsert_replaced", replaced and entries[0]["file"] == "a2.json"
+          and entries[0]["tag_style"] == "danbooru" and entries[0]["size_preset"] == "flux", str(entries))
+    entries2, replaced2 = workflow_mgr.upsert_entry(entries, {"name": "b", "file": "b.json"})
+    check("upsert_appended", (not replaced2) and len(entries2) == 2, str(entries2))
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

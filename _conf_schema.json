@@ -142,9 +142,29 @@
         "type": "string",
         "default": "",
         "hint": "填萌绘服务器列表里的唯一 key 或名字；留空 = 用萌绘里「设为默认」的那台"
+      },
+      "workflow": {
+        "description": "使用萌绘的哪个工作流",
+        "type": "string",
+        "default": "",
+        "hint": "仅当「工作流来源」= 萌绘时生效；填萌绘工作流名（或 id）；留空 = 用萌绘里第一个可用的新版工作流"
+      },
+      "size_preset": {
+        "description": "萌绘工作流的尺寸策略",
+        "type": "string",
+        "options": ["follow", "sdxl", "flux", "sd15"],
+        "default": "follow",
+        "hint": "follow = 跟随基础工作流里 latent 的默认宽高（横竖互换）；其余按预设白名单"
       }
     },
     "default": {}
+  },
+  "workflow_source": {
+    "description": "工作流来源",
+    "type": "string",
+    "options": ["local", "anima"],
+    "default": "local",
+    "hint": "local = 用本插件工作流库（在 WebUI「工作流模板」页上传 JSON）；anima = 直接跟随萌绘的控制台工作流（含它配的采样器/放大/保存覆盖）"
   },
   "workflow_selection": {
     "description": "工作流选择方式",

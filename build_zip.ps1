@@ -72,6 +72,7 @@ if ($LASTEXITCODE -ne 0) {
 # Keep this in sync with main.py's import list and the modules under this folder.
 $includeList = @(
     "main.py",
+    "config_coerce.py",  # config read/write pure helpers (dot-path keys; unit-tested)
     "comfy_client.py",   # ComfyUI HTTP client (adapted from anima, AGPL same-source)
     "prompter.py",       # diversity draw + LLM JSON contract
     "workflow_mgr.py",   # workflow templates: load/locate/inject/rotate

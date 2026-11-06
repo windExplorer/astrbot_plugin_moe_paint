@@ -5,7 +5,7 @@
 import { computed, onMounted, ref } from "vue";
 import { NButton, NEmpty, NSelect, NSpin, NTag, useMessage } from "naive-ui";
 import { apiAnima, apiAnimaSync, apiDebugComfy, type AnimaInfo, type ComfyProbe } from "../api";
-import { refreshStatus } from "../store";
+import { refreshStatus, status } from "../store";
 
 const message = useMessage();
 const info = ref<AnimaInfo | null>(null);
@@ -187,14 +187,34 @@ onMounted(load);
           </div>
         </div>
 
+        <!-- 工作流联动 -->
+        <div class="mp-card">
+          <div class="mp-card-head">
+            <div class="mp-card-title">工作流</div>
+            <n-button size="small" @click="$router.push('/workflows')">去工作流页 →</n-button>
+          </div>
+          <div class="mp-hint" style="margin-bottom: 10px">
+            联动的默认只共用「服务器地址」，工作流仍是各自一套。想让绘卷直接用萌绘里配好的工作流，
+            到「工作流模板」页把来源切成「跟随萌绘」并选一条 —— 采样器/放大/保存等覆盖也会照萌绘来。
+          </div>
+          <div class="mp-row">
+            <n-tag size="small" :bordered="false" :type="status?.workflow_source === 'anima' ? 'success' : 'default'">
+              当前来源：{{ status?.workflow_source === "anima" ? "跟随萌绘" : "本插件工作流库" }}
+            </n-tag>
+            <n-tag v-if="status?.workflow_source === 'anima'" size="small" :bordered="false">
+              {{ status?.anima?.workflow || "萌绘第一个可用工作流" }}
+            </n-tag>
+          </div>
+        </div>
+
         <!-- 联动边界 -->
         <div class="mp-card mp-card--flat">
           <div class="mp-card-title">联动的边界</div>
           <ul class="notes">
-            <li>只读取萌绘的 <code class="mp-mono">comfyui_servers[].url</code>，不写萌绘的任何配置。</li>
+            <li>只读取萌绘的 <code class="mp-mono">comfyui_servers[].url</code> 与它的工作流库，不写萌绘的任何配置。</li>
             <li>不调用萌绘的绘图接口（<code class="mp-mono">comfyui_draw</code>）——绘卷直接连 ComfyUI HTTP API，萌绘升级不影响这里。</li>
             <li>共用服务器时靠「队列避让阈值」协调：定时出图发现前方有萌绘的任务就顺延，不抢队列。</li>
-            <li>工作流模板、图库、提示词风格都是各自独立的一套。</li>
+            <li>图库、提示词风格、底模库各自独立；只有选「跟随萌绘」时工作流跟随。</li>
           </ul>
         </div>
       </template>

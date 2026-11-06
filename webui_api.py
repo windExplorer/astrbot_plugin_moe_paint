@@ -15,6 +15,8 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.web import file_response, request
 
+from . import config_coerce
+
 PREFIX = "/astrbot_plugin_moe_paint"
 PLUGIN_TAG = "[萌萌绘卷]"
 
@@ -123,6 +125,7 @@ async def h_status(plugin) -> dict:
         "counts": counts,
         "today_success": today_n,
         "templates": tpl_public,
+        "workflow_source": str(plugin._cfg().get("workflow_source") or "local"),
         "selection_mode": str(plugin._cfg().get("workflow_selection") or "random"),
         "comfy": comfy,
         "llm": {
@@ -138,6 +141,8 @@ async def h_status(plugin) -> dict:
             "server_key": str(acfg.get("server_key") or ""),
             "active_url": str(anima.get("active_url") or ""),
             "active_name": str(anima.get("active_name") or ""),
+            "workflow": str(acfg.get("workflow") or ""),
+            "size_preset": str(acfg.get("size_preset") or "follow"),
         },
     })
 
@@ -378,11 +383,53 @@ async def h_workflows(plugin) -> dict:
         plugin.reload_templates()
     except Exception as e:
         return err(f"模板加载失败: {e}")
+    source = str(plugin._cfg().get("workflow_source") or "local")
     return ok({
         "templates": [t.to_public() for t in plugin._templates],
         "selection_mode": str(plugin._cfg().get("workflow_selection") or "random"),
         "workflows_dir": str(plugin.workflows_dir or ""),
+        "source": source,
+        "anima": plugin.anima_workflows() if source == "anima" else {
+            "installed": plugin.anima_info().get("installed"),
+            "workflows": [],
+            "error": "",
+        },
     })
+
+
+async def h_workflow_parse(plugin) -> dict:
+    """POST {json_text}：只解析不入库（上传预览）。"""
+    body = await _payload()
+    text = body.get("json_text")
+    if not isinstance(text, str) or not text.strip():
+        return err("请提供 json_text（工作流 JSON 文本）")
+    if len(text) > 8 * 1024 * 1024:
+        return err("JSON 太大（上限 8MB）")
+    return ok(plugin.preview_workflow(text))
+
+
+async def h_workflow_upload(plugin) -> dict:
+    """POST {name, json_text, tag_style?, size_preset?, default_negative?, enabled?}"""
+    body = await _payload()
+    text = body.get("json_text")
+    if not isinstance(text, str) or not text.strip():
+        return err("请提供 json_text（工作流 JSON 文本）")
+    if len(text) > 8 * 1024 * 1024:
+        return err("JSON 太大（上限 8MB）")
+    res = plugin.import_workflow(
+        name=str(body.get("name") or ""),
+        text=text,
+        tag_style=str(body.get("tag_style") or "danbooru"),
+        size_preset=str(body.get("size_preset") or "sdxl"),
+        default_negative=str(body.get("default_negative") or ""),
+        enabled=_bool_of(body.get("enabled", True), True),
+    )
+    return ok(res) if res.get("ok") else err(res.get("error") or "入库失败")
+
+
+async def h_anima_workflows(plugin) -> dict:
+    """GET /anima/workflows：萌绘的出图工作流 + 基础工作流解析状态。"""
+    return ok(plugin.anima_workflows())
 
 
 # --------------------------------------------------------------------------- #
@@ -400,62 +447,9 @@ def _schema() -> dict:
         return {}
 
 
-def _cast_value(spec: dict, value, key: str):
-    """按 schema 的 type 转换；bool 兼容常见字符串写法，失败抛带键名的 ValueError。"""
-    t = str((spec or {}).get("type") or "string")
-    try:
-        if t == "bool":
-            if isinstance(value, bool):
-                return value
-            s = str(value).strip().lower()
-            if s in ("true", "1", "on", "yes"):
-                return True
-            if s in ("false", "0", "off", "no"):
-                return False
-            raise ValueError(f"{key} 需要 true/false，收到 {value!r}")
-        if t == "int":
-            return int(float(value))
-        if t == "float":
-            return float(value)
-        if t == "list":
-            if isinstance(value, list):
-                return [str(v) for v in value]
-            raise ValueError(f"{key} 需要数组，收到 {type(value).__name__}")
-        if t == "dict":
-            if isinstance(value, dict):
-                return value
-            raise ValueError(f"{key} 需要对象，收到 {type(value).__name__}")
-        return "" if value is None else str(value)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"{key} 类型转换失败: {e}") from e
-
-
-def _coerce_template_list(raw, spec: dict):
-    """模板清单整体替换：逐条白名单字段 + 类型转换；空清单拒绝（防一键清空）。"""
-    if not isinstance(raw, list):
-        raise ValueError("workflow_templates 需要数组")
-    fields = (spec or {}).get("items") or {}
-    out: list[dict] = []
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(f"模板 #{i + 1} 不是对象")
-        name = str(item.get("name") or "").strip()
-        file = str(item.get("file") or "").strip()
-        if not name or not file:
-            raise ValueError(f"模板 #{i + 1} 缺 name 或 file")
-        entry: dict = {"name": name, "file": file}
-        for f, fs in fields.items():
-            if f in ("name", "file") or f not in item:
-                continue
-            v = _cast_value(fs, item.get(f), f"模板#{i + 1}.{f}")
-            opts = (fs or {}).get("options")
-            if opts and v and v not in opts:
-                raise ValueError(f"模板 #{i + 1} 的 {f} 取值必须是 {opts} 之一（收到 {v!r}）")
-            entry[f] = v
-        out.append(entry)
-    if not out:
-        raise ValueError("workflow_templates 不能为空（至少保留一个模板；要停用请关 enabled）")
-    return out
+# 校验/转换逻辑拆到 config_coerce（纯函数、可测），这里只负责「读写 + 落盘 + 副作用」。
+_cast_value = config_coerce.cast_value
+_coerce_template_list = config_coerce.coerce_template_list
 
 
 async def h_get_config(plugin) -> dict:
@@ -488,45 +482,13 @@ async def h_set_config(plugin) -> dict:
     cfg = plugin.config
     if cfg is None or not hasattr(cfg, "__setitem__"):
         return err("插件配置不可写")
-    writes: list[tuple[tuple, object]] = []
     try:
-        for key, value in raw.items():
-            spec = schema.get(key)
-            if spec is None:
-                return err(f"未知配置项: {key}")
-            t = str(spec.get("type") or "")
-            if t == "object":
-                if not isinstance(value, dict):
-                    raise ValueError(f"{key} 需要对象（子键请拆成点号键传，如 {key}.url）")
-                sub_fields = spec.get("items") or {}
-                for f, v in value.items():
-                    fs = sub_fields.get(f)
-                    if fs is None:
-                        raise ValueError(f"未知配置项: {key}.{f}")
-                    writes.append(((key, f), _cast_value(fs, v, f"{key}.{f}")))
-            elif t == "template_list":
-                writes.append(((key,), _coerce_template_list(value, spec)))
-            else:
-                v = _cast_value(spec, value, key)
-                opts = spec.get("options")
-                if opts and v != "" and v not in opts:
-                    raise ValueError(f"{key} 取值必须是 {opts} 之一（收到 {v!r}）")
-                writes.append(((key,), v))
+        writes, problem = config_coerce.build_writes(raw, schema)
     except ValueError as e:
         return err(str(e))
-    if not writes:
-        return err("没有可写入的配置项")
-    changed: list[str] = []
-    for path, v in writes:
-        if len(path) == 1:
-            cfg[path[0]] = v
-        else:
-            sub = cfg.get(path[0])
-            if not isinstance(sub, dict):
-                sub = {}
-                cfg[path[0]] = sub
-            sub[path[1]] = v
-        changed.append(".".join(path))
+    if problem:
+        return err(problem)
+    changed = config_coerce.apply_writes(cfg, writes)
     try:
         cfg.save_config()
     except Exception as e:
@@ -679,6 +641,7 @@ async def h_debug_env(plugin) -> dict:
         "db_path": str(getattr(plugin.store, "path", "") or ""),
         "delivery_sessions": plugin._delivery_sessions(),
         "templates": [t.to_public() for t in plugin._templates],
+        "workflow_source": str(plugin._cfg().get("workflow_source") or "local"),
         "selection_mode": str(plugin._cfg().get("workflow_selection") or "random"),
         "queue_defer_threshold": plugin._int_of(
             plugin._sub("comfyui"), "queue_defer_threshold", 2, lo=0, hi=100
@@ -733,6 +696,9 @@ def register(plugin) -> None:
         ("/record/resend", h_resend, ["POST"]),
         ("/stats", h_stats, ["GET"]),
         ("/workflows", h_workflows, ["GET"]),
+        ("/workflows/parse", h_workflow_parse, ["POST"]),
+        ("/workflows/upload", h_workflow_upload, ["POST"]),
+        ("/anima/workflows", h_anima_workflows, ["GET"]),
         ("/config", h_get_config, ["GET"]),
         ("/config", h_set_config, ["POST"]),
         ("/providers", h_providers, ["GET"]),

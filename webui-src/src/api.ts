@@ -142,6 +142,8 @@ export interface TemplatePublic {
   ok: boolean;
   problem: string;
   nodes: Record<string, any>;
+  warnings?: string[];
+  source?: string;
 }
 
 export interface AnimaBrief {
@@ -172,10 +174,11 @@ export interface StatusPayload {
   today_success: number;
   templates: TemplatePublic[];
   selection_mode: string;
+  workflow_source?: string;
   comfy: { ok: boolean; elapsed_ms: number; error: string; url?: string; source?: string };
   llm: { provider_id: string; found: boolean; label: string };
   delivery_sessions: number;
-  anima: AnimaBrief;
+  anima: AnimaBrief & { workflow?: string; size_preset?: string };
 }
 
 export interface StatsPayload {
@@ -331,10 +334,85 @@ export function apiResend(id: number) {
   );
 }
 
+export interface AnimaWorkflowRow {
+  key: string;
+  name: string;
+  enabled: boolean;
+  base_id: string;
+  base_name: string;
+  model_file: string;
+  parse_ok: boolean;
+  supported: boolean;
+  reason: string;
+}
+
+export interface AnimaWorkflowPayload {
+  installed: boolean;
+  activated: boolean;
+  version: string;
+  error: string;
+  workflows: AnimaWorkflowRow[];
+  selected: string;
+  source: string;
+}
+
+export interface WorkflowAnalyze {
+  ok: boolean;
+  errors: string[];
+  problems: string[];
+  warnings: string[];
+  node_count: number;
+  nodes: {
+    positive: string;
+    negative: string;
+    latent: string;
+    latent_class: string;
+    save: string;
+    save_class: string;
+    model_file: string;
+    default_width: number;
+    default_height: number;
+    seed_nodes: number;
+    kind: string;
+  };
+}
+
 export function apiWorkflows() {
-  return apiGet<{ templates: TemplatePublic[]; selection_mode: string; workflows_dir: string }>(
-    "/workflows",
-  );
+  return apiGet<{
+    templates: TemplatePublic[];
+    selection_mode: string;
+    workflows_dir: string;
+    source: string;
+    anima?: AnimaWorkflowPayload;
+  }>("/workflows");
+}
+
+/** 只解析不入库（上传预览）。 */
+export function apiWorkflowParse(jsonText: string) {
+  return apiPost<WorkflowAnalyze>("/workflows/parse", { json_text: jsonText }, 30000);
+}
+
+/** 上传入库：落盘 + 写入模板清单。 */
+export function apiWorkflowUpload(payload: {
+  name: string;
+  json_text: string;
+  tag_style?: string;
+  size_preset?: string;
+  default_negative?: string;
+  enabled?: boolean;
+}) {
+  return apiPost<{
+    ok: boolean;
+    name: string;
+    file: string;
+    replaced: boolean;
+    nodes: Record<string, any>;
+    warnings: string[];
+  }>("/workflows/upload", payload, 30000);
+}
+
+export function apiAnimaWorkflows() {
+  return apiGet<AnimaWorkflowPayload>("/anima/workflows", 15000);
 }
 
 // ---------------------------------------------------------------- 配置

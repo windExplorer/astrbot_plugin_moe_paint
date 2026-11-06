@@ -1,5 +1,54 @@
 # 更新日志
 
+## v0.4.0（工作流：WebUI 上传解析 + 可直接用萌绘的工作流）
+
+需求（用户反馈）：
+1. 工作流只能自己往服务器目录丢文件，**WebUI 里不能上传和解析**，太原始；
+2. 既然联动了萌绘，**就应该能用萌绘里配好的工作流**，而不是各维护一套。
+
+### 一、顺手修掉的严重 bug：嵌套配置项根本存不进去
+
+- 现象：v0.3.0 之后每个配置页点「保存」都只弹一句「未知配置项: schedule.quiet_enabled」，
+  嵌套键（`comfyui.*` / `llm.*` / `schedule.*` / `anima.*` / `theme.*` / `delivery.*` / `gallery.*`）**一个都写不进去**。
+- 根因：`h_set_config` 用 `schema.get(key)` 只查顶层键，而前端提交的是扁平点号键。
+  冒烟测试的桩桥把 POST 直接回 `{status:"ok"}`，所以 UI 冒烟测不出来。
+- 修复：把配置读写的纯逻辑抽到新模块 `config_coerce.py`（`resolve_spec` / `cast_value` /
+  `coerce_template_list` / `build_writes` / `apply_writes`），点号键按「父键 + 子键」解析，
+  并新增 `tests/test_config_coerce.py`（22 条断言，含「前端用到的 25 个点号键都必须能解析」）。
+  这类"保存静默失败"只能靠单测守住。
+- 新模块已同步进 `build_zip.ps1` 的 `$includeList` 与 `main.py` 的热重载列表。
+
+### 二、工作流可以在 WebUI 上传 + 解析入库
+
+- 新增 `POST /workflows/parse`（只解析不入库）与 `POST /workflows/upload`（解析 → 落盘 → 更新清单 → 重载）。
+- `workflow_mgr` 新增：
+  - `parse_upload(text)`：识别 ComfyUI **API 格式**，遇到界面格式（含 `nodes`/`links`）直接给
+    「请在 ComfyUI 里用导出 (API)」的人话提示；兼容 `/history` 那种 `{prompt: {...}}` 包一层；
+  - `analyze(wf)`：在 `locate_nodes` 之上补出**底模文件名 / 保存节点 / latent 类名与默认宽高 / 文生图·图生图判定 / 软警告**；
+    图生图链路（latent 无 width/height）**拒绝入库**，不会等到出图时才炸；
+  - `save_workflow_file()`（文件名清洗 + 同名覆盖）、`upsert_entry()`（同名覆盖/追加）、`follow_sizes()`（按 latent 默认宽高派生横竖方三档）。
+- 「工作流模板」页改造：拖拽/选择 `.json` 或直接粘贴 JSON → **解析预览**（正向/负向/latent/保存节点、底模、默认尺寸、seed 数、问题与警告）→ 确认入库；
+  清单行下方常驻一行解析摘要，失败原因就地显示。
+
+### 三、可以直接用萌绘的工作流（follow 模式）
+
+- 新增 `workflow_source`（`local` / `anima`）与 `anima.workflow`（选萌绘哪条工作流）、`anima.size_preset`（默认 `follow`）。
+- 实现方式：拿到萌绘插件实例后调用它的 `_load_from_base` + `_apply_base_overrides` ——
+  于是**萌绘里配的采样器/步数/CFG/放大三态/清理注入/保存格式覆盖都会生效**，与萌绘自己出图一致，
+  不需要在本插件复刻那套规则。两个方法是半公开的，调用失败只降级为「只用基础工作流底图」并记警告，不会把插件带崩。
+- 尺寸策略 `follow`：直接用基础工作流 latent 的默认宽高（横/竖自动互换、方图取短边），
+  不再强行套 sdxl/flux 白名单 —— 换了底模或分辨率时不会再被正方形挤变形。
+- 新增 `GET /anima/workflows`：列出萌绘的出图工作流、其关联的基础工作流名/底模/解析状态，
+  旧版（无 `base_id`）或基础工作流解析失败的在 UI 里标「不可用」并给出原因；支持一键「用这条」。
+- 「关联萌绘」页新增「工作流」小节，显示当前来源并可跳转设置。
+- 跟随模式下出图失败的记录会写明真实原因（例如「跟随萌绘模式：读取萌绘工作流失败：…」），不再是含糊的「没有可用模板」。
+
+### 工程
+
+- 新增 `tests/test_config_coerce.py`；`tests/test_workflow_mgr.py` 增补 20 条（上传解析/analyze/跟随尺寸/入库文件名/清单覆盖）；
+  `tests/test_schema.py` 覆盖新增的三个键。
+- 九条页面路由 + 「工作流来源=萌绘」模式经桩桥冒烟通过（本地/萌绘两种模式各一轮）。
+
 ## v0.3.0（控制台重构：左右结构九页 + 调度配置讲故事 + 关联萌绘/调试）
 
 现象与诉求（用户实测反馈，逐条对应）：

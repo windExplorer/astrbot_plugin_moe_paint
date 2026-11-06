@@ -51,17 +51,17 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.3.0",
+    "v0.4.0",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         # AstrBot 热更新只重载 main.py，依赖子模块会残留在 sys.modules 里跑旧代码；
         # 这里按依赖序（被依赖者在前）强制重载并重新绑定全局名（box/anima/moe_meme 同款）。
-        global comfy_client, delivery, gallery_store, prompter, scheduler, webui_api, workflow_mgr
+        global comfy_client, config_coerce, delivery, gallery_store, prompter, scheduler, webui_api, workflow_mgr
         try:
             for _dep in (
-                "comfy_client", "prompter", "workflow_mgr", "gallery_store",
+                "comfy_client", "prompter", "workflow_mgr", "config_coerce", "gallery_store",
                 "delivery", "scheduler", "webui_api",
             ):
                 try:
@@ -70,12 +70,12 @@ class MoePaintPlugin(Star):
                 except Exception as _err:
                     logger.warning(f"{PLUGIN_TAG} {_dep} 强制重载失败（沿用已加载模块）: {_err}")
             from . import (
-                comfy_client as _cc, delivery as _dl, gallery_store as _gs,
-                prompter as _pm, scheduler as _sch, webui_api as _wa,
-                workflow_mgr as _wm,
+                comfy_client as _cc, config_coerce as _cf, delivery as _dl,
+                gallery_store as _gs, prompter as _pm, scheduler as _sch,
+                webui_api as _wa, workflow_mgr as _wm,
             )
             comfy_client, prompter, workflow_mgr = _cc, _pm, _wm
-            gallery_store, delivery, scheduler, webui_api = _gs, _dl, _sch, _wa
+            config_coerce, gallery_store, delivery, scheduler, webui_api = _cf, _gs, _dl, _sch, _wa
         except Exception as _reload_err:
             logger.warning(f"{PLUGIN_TAG} 依赖模块重载流程异常（沿用已加载模块）: {_reload_err}")
 
@@ -290,6 +290,166 @@ class MoePaintPlugin(Star):
             if info.get("active_url"):
                 return str(info["active_url"]), "anima"
         return manual, "manual"
+
+    # ------------------------------------------------------------------ #
+    # 关联萌绘：用它的工作流（workflow_source = anima）
+    # ------------------------------------------------------------------ #
+
+    def _anima_instance(self):
+        """萌绘插件实例（未激活时为 None）。只调用它的公开/半公开方法，失败一律降级。"""
+        md = self._anima_star()
+        if md is None or not getattr(md, "activated", False):
+            return None
+        return getattr(md, "star_cls", None)
+
+    def _anima_workflow_cfgs(self) -> list:
+        inst = self._anima_instance()
+        if inst is None:
+            return []
+        try:
+            ws = inst._workflows() or []
+        except Exception as e:
+            logger.debug(f"{PLUGIN_TAG} 读取萌绘工作流列表失败: {e}")
+            return []
+        return [w for w in ws if isinstance(w, dict)]
+
+    def anima_workflows(self) -> dict:
+        """列出萌绘的出图工作流 + 其关联基础工作流的解析状态。"""
+        md = self._anima_star()
+        inst = self._anima_instance()
+        acfg = self._sub("anima")
+        out: dict = {
+            "installed": md is not None,
+            "activated": inst is not None,
+            "version": str(getattr(md, "version", "") or "") if md is not None else "",
+            "error": "",
+            "workflows": [],
+            "selected": str(acfg.get("workflow") or ""),
+            "source": str(self._cfg().get("workflow_source") or "local"),
+        }
+        if inst is None:
+            out["error"] = "萌绘未安装或未激活"
+            return out
+        store = getattr(inst, "workflow_store", None)
+        cfgs = self._anima_workflow_cfgs()
+        if not cfgs:
+            out["error"] = "萌绘里还没有工作流（去萌绘控制台的工作流页新建一个）"
+            return out
+        for i, w in enumerate(cfgs):
+            bid = str(w.get("base_id") or "").strip()
+            rec = None
+            if store is not None and bid.isdigit():
+                try:
+                    rec = store.get(int(bid))
+                except Exception:
+                    rec = None
+            roles = (rec or {}).get("roles") or {}
+            parse_ok = bool(rec) and bool(rec.get("parse_ok"))
+            reason = ""
+            if not bid:
+                reason = "旧版工作流（未关联基础工作流），暂不支持"
+            elif not rec:
+                reason = "关联的基础工作流已被删除"
+            elif not parse_ok:
+                reason = str(rec.get("parse_msg") or "基础工作流解析未通过")
+            out["workflows"].append({
+                "key": str(w.get("workflow_id") or ""),
+                "name": str(w.get("name") or f"工作流{i + 1}"),
+                "enabled": bool(w.get("enabled", True)),
+                "base_id": bid,
+                "base_name": str((rec or {}).get("name") or ""),
+                "model_file": str(roles.get("model_file") or ""),
+                "parse_ok": parse_ok,
+                "supported": bool(bid) and parse_ok,
+                "reason": reason,
+            })
+        return out
+
+    def _anima_template(self):
+        """把萌绘选中的工作流组装成本插件的 Template（含它自己的覆盖参数）。
+
+        优先用萌绘的运行时构造（`_load_from_base` + `_apply_base_overrides`），
+        这样「固定种子 / 步数 / 采样器 / 放大 / 清理 / 保存格式」等覆盖与萌绘出图一致；
+        这两个是半公开方法，改名时只降级为「只用基础工作流底图」，不会把插件带崩。
+        """
+        name_fallback = "萌绘工作流"
+        inst = self._anima_instance()
+        if inst is None:
+            return workflow_mgr.Template(
+                name=name_fallback, file="", source="anima", ok=False,
+                problem="萌绘未安装或未激活，无法使用它的工作流",
+            )
+        acfg = self._sub("anima")
+        want = str(acfg.get("workflow") or "").strip()
+        cfgs = self._anima_workflow_cfgs()
+        if not cfgs:
+            return workflow_mgr.Template(
+                name=name_fallback, file="", source="anima", ok=False,
+                problem="萌绘里还没有工作流（去萌绘控制台的工作流页新建）",
+            )
+        chosen = None
+        for w in cfgs:
+            if want and want in (str(w.get("name") or "").strip(), str(w.get("workflow_id") or "").strip()):
+                chosen = w
+                break
+        if chosen is None:
+            for w in cfgs:
+                if bool(w.get("enabled", True)) and str(w.get("base_id") or "").strip():
+                    chosen = w
+                    break
+        if chosen is None:
+            return workflow_mgr.Template(
+                name=name_fallback, file="", source="anima", ok=False,
+                problem=(f"萌绘里找不到可用的工作流「{want}」" if want
+                         else "萌绘里没有可用的新版工作流（需要先关联基础工作流）"),
+            )
+        name = str(chosen.get("name") or name_fallback).strip()
+        bid = str(chosen.get("base_id") or "").strip()
+        try:
+            wf_ctx, prompt = inst._load_from_base(chosen)
+        except Exception as e:
+            return workflow_mgr.Template(
+                name=name, file=f"anima:{bid or '?'}", source="anima", ok=False,
+                problem=f"读取萌绘工作流失败：{e}",
+            )
+        try:
+            inst._apply_base_overrides(wf_ctx, prompt)
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 应用萌绘工作流覆盖失败（继续用底图原参数）: {e}")
+        override = {
+            "positive_node": wf_ctx.get("positive_node"),
+            "positive_field": wf_ctx.get("positive_field"),
+            "negative_node": wf_ctx.get("negative_node"),
+            "negative_field": wf_ctx.get("negative_field"),
+            "latent_node": wf_ctx.get("resolution_node"),
+        }
+        override = {k: str(v).strip() for k, v in override.items() if str(v or "").strip()}
+        info = workflow_mgr.analyze(prompt, override)
+        preset = str(acfg.get("size_preset") or "follow").strip() or "follow"
+        if preset == "follow":
+            sizes = workflow_mgr.follow_sizes(info.get("default_width"), info.get("default_height"))
+        else:
+            sizes = prompter.SIZE_PRESETS.get(preset, prompter.SIZE_PRESETS["sdxl"])
+        tag_style = "danbooru"
+        try:
+            if wf_ctx.get("is_anima") is False:
+                tag_style = "natural"
+        except Exception:
+            pass
+        return workflow_mgr.Template(
+            name=name,
+            file=f"anima:{bid or '?'}",
+            tag_style=tag_style,
+            size_preset=preset,
+            default_negative="",
+            enabled=True,
+            wf=prompt,
+            info=info,
+            ok=not info.get("problems"),
+            problem="；".join(info.get("problems") or []),
+            sizes=sizes,
+            source="anima",
+        )
 
     # ------------------------------------------------------------------ #
     # ComfyUI 客户端（按配置懒建；url/timeout 变了才重建）
@@ -516,6 +676,16 @@ class MoePaintPlugin(Star):
                 logger.warning(f"{PLUGIN_TAG} 内置工作流复制失败: {e}")
 
     def reload_templates(self) -> None:
+        """按 workflow_source 装配模板：local = 本插件工作流库；anima = 用萌绘的工作流。"""
+        source = str(self._cfg().get("workflow_source") or "local").strip()
+        if source == "anima":
+            tpl = self._anima_template()
+            self._templates = [tpl] if tpl is not None else []
+            if tpl is not None and not tpl.ok:
+                logger.warning(f"{PLUGIN_TAG} 萌绘工作流不可用：{tpl.problem}")
+            elif tpl is not None:
+                logger.info(f"{PLUGIN_TAG} 模板来源：萌绘工作流「{tpl.name}」（{tpl.file}）")
+            return
         entries = self._cfg().get("workflow_templates")
         if not isinstance(entries, list):
             entries = []
@@ -526,6 +696,100 @@ class MoePaintPlugin(Star):
             logger.warning(f"{PLUGIN_TAG} 模板问题：{'; '.join(f'{t.name}: {t.problem}' for t in bad)}")
         if not workflow_mgr.enabled_pool(self._templates):
             logger.warning(f"{PLUGIN_TAG} 没有可用的工作流模板，调度会空转（检查配置 workflow_templates）")
+
+    # ------------------------------------------------------------------ #
+    # 工作流上传 / 解析（WebUI）
+    # ------------------------------------------------------------------ #
+
+    def preview_workflow(self, text: str) -> dict:
+        """只解析不入库：给上传预览用。"""
+        wf, errors = workflow_mgr.parse_upload(str(text or ""))
+        if wf is None:
+            return {"ok": False, "errors": errors, "problems": [], "warnings": [],
+                    "nodes": {}, "node_count": 0}
+        info = workflow_mgr.analyze(wf)
+        return {
+            "ok": not errors and not info.get("problems"),
+            "errors": errors,
+            "problems": info.get("problems") or [],
+            "warnings": info.get("warnings") or [],
+            "nodes": {
+                "positive": info.get("positive", ""),
+                "negative": info.get("negative", ""),
+                "latent": info.get("latent", ""),
+                "latent_class": info.get("latent_class", ""),
+                "save": info.get("save", ""),
+                "save_class": info.get("save_class", ""),
+                "model_file": info.get("model_file", ""),
+                "default_width": info.get("default_width") or 0,
+                "default_height": info.get("default_height") or 0,
+                "seed_nodes": len(info.get("seed_nodes") or []),
+                "kind": info.get("kind", "t2i"),
+            },
+            "node_count": len(wf),
+        }
+
+    def import_workflow(
+        self,
+        name: str,
+        text: str,
+        tag_style: str = "danbooru",
+        size_preset: str = "sdxl",
+        default_negative: str = "",
+        enabled: bool = True,
+    ) -> dict:
+        """上传入库：解析 → 落盘 workflows/<名>.json → 更新清单 → 重载。"""
+        name = str(name or "").strip()[:60]
+        if not name:
+            return {"ok": False, "error": "模板名不能为空"}
+        if self.workflows_dir is None:
+            return {"ok": False, "error": "工作流目录未初始化（插件数据目录异常）"}
+        preview = self.preview_workflow(text)
+        if preview.get("problems"):
+            return {"ok": False, "error": "；".join(preview["problems"]), "problems": preview["problems"]}
+        if not preview.get("node_count"):
+            return {"ok": False, "error": (preview.get("errors") or ["工作流为空"])[0]}
+        wf, errors = workflow_mgr.parse_upload(str(text or ""))
+        if wf is None:
+            return {"ok": False, "error": errors[0] if errors else "解析失败"}
+        try:
+            fname = workflow_mgr.save_workflow_file(self.workflows_dir, name, wf)
+        except Exception as e:
+            return {"ok": False, "error": f"写入工作流文件失败：{e}"}
+        entry = {
+            "name": name,
+            "file": fname,
+            "tag_style": str(tag_style or "danbooru"),
+            "size_preset": str(size_preset or "sdxl"),
+            "default_negative": str(default_negative or "").strip(),
+            "enabled": bool(enabled),
+        }
+        cfg = self.config
+        if cfg is None:
+            return {"ok": False, "error": "插件配置不可写"}
+        entries = cfg.get("workflow_templates")
+        entries = entries if isinstance(entries, list) else []
+        new_entries, replaced = workflow_mgr.upsert_entry(entries, entry)
+        cfg["workflow_templates"] = new_entries
+        try:
+            cfg.save_config()
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 工作流清单落盘失败: {e}")
+            return {"ok": False, "error": f"清单已改内存但落盘失败：{e}"}
+        try:
+            self.reload_templates()
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 模板重载失败: {e}")
+        logger.info(f"{PLUGIN_TAG} 工作流已入库「{name}」→ {fname}（{'覆盖' if replaced else '新增'}）")
+        self.debug_log("workflow", f"上传工作流「{name}」（{fname}，{'覆盖' if replaced else '新增'}）")
+        return {
+            "ok": True,
+            "name": name,
+            "file": fname,
+            "replaced": replaced,
+            "nodes": preview.get("nodes") or {},
+            "warnings": preview.get("warnings") or [],
+        }
 
     # ------------------------------------------------------------------ #
     # 生成管线
@@ -606,7 +870,11 @@ class MoePaintPlugin(Star):
             )
             try:
                 if tpl is None:
-                    raise RuntimeError("没有可用的工作流模板（检查配置 workflow_templates 与 data 目录）")
+                    hint = "（检查配置 workflow_templates 与 data 目录）"
+                    if str(self._cfg().get("workflow_source") or "local") == "anima":
+                        why = self._templates[0].problem if self._templates else "萌绘里没有可用工作流"
+                        hint = f"（跟随萌绘模式：{why}）"
+                    raise RuntimeError("没有可用的工作流模板" + hint)
 
                 payload, prov_label, llm_ms = await self._llm_prompt(brief, tpl)
                 width, height = prompter.pick_size(tpl.sizes, brief["orientation"], brief["composition"], _PICK_RANDOM)
