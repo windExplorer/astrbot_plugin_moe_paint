@@ -33,6 +33,7 @@ interface TmplRow {
   tag_style: string;
   size_preset: string;
   prompt_profile: string;
+  subject_scope: string;
   default_negative: string;
   enabled: boolean;
   positive_node: string;
@@ -48,6 +49,7 @@ interface TmplRow {
   quality_prefix?: string;
   eff_style?: string;
   eff_preset?: string;
+  eff_scope?: string;
 }
 
 const rows = ref<TmplRow[]>([]);
@@ -72,6 +74,11 @@ const animaProfile = computed({
   get: () => String(cfgGet("anima.prompt_profile", "auto")),
   set: (v: string) => cfgSet("anima.prompt_profile", v),
 });
+/** 跟随萌绘时整体指定题材能力（萌绘工作流没法逐条标）。 */
+const animaScope = computed({
+  get: () => String(cfgGet("anima.subject_scope", "auto")),
+  set: (v: string) => cfgSet("anima.subject_scope", v),
+});
 const selectionMode = computed({
   get: () => String(cfgGet("workflow_selection", "random")),
   set: (v: string) => cfgSet("workflow_selection", v),
@@ -90,6 +97,15 @@ const profileOptions = [
   { label: "自动（按底模判断）", value: "auto" },
   ...styleOptions,
 ];
+const scopeOptions = [
+  { label: "自动（按底模推断）", value: "auto" },
+  { label: "动漫 · 只画二次元题材", value: "anime" },
+  { label: "真人 · 只画写真题材", value: "photo" },
+  { label: "通吃 · 不限制题材", value: "both" },
+];
+const SCOPE_LABEL: Record<string, string> = {
+  anime: "动漫", photo: "真人", both: "通吃", auto: "自动",
+};
 const presetOptions = [
   { label: "跟随工作流（用 latent 默认尺寸）", value: "follow" },
   { label: "sdxl · 1216×832 / 832×1216 / 1024²", value: "sdxl" },
@@ -105,6 +121,7 @@ const upName = ref("");
 const upStyle = ref("danbooru");
 const upPreset = ref("sdxl");
 const upProfile = ref("auto");
+const upScope = ref("auto");
 const upNegative = ref("");
 const preview = ref<WorkflowAnalyze | null>(null);
 const parsing = ref(false);
@@ -130,6 +147,7 @@ function normalizeRow(r: any): TmplRow {
     tag_style: String(r?.tag_style || "danbooru"),
     size_preset: String(r?.size_preset || "sdxl"),
     prompt_profile: String(r?.prompt_profile || "auto"),
+    subject_scope: String(r?.subject_scope || "auto"),
     default_negative: String(r?.default_negative || ""),
     enabled: r?.enabled !== false,
     positive_node: String(r?.positive_node || ""),
@@ -162,6 +180,7 @@ function mergeValidation(templates: TemplatePublic[]) {
       r.quality_prefix = (t as any).quality_prefix || "";
       r.eff_style = t.tag_style;
       r.eff_preset = t.size_preset;
+      r.eff_scope = (t as any).scope || "";
     }
   }
 }
@@ -203,6 +222,7 @@ async function saveSource() {
       "anima.workflow",
       "anima.size_preset",
       "anima.prompt_profile",
+      "anima.subject_scope",
     ],
     "工作流来源",
   );
@@ -249,6 +269,7 @@ async function save() {
     tag_style: r.tag_style,
     size_preset: r.size_preset,
     prompt_profile: r.prompt_profile,
+    subject_scope: r.subject_scope,
     default_negative: r.default_negative,
     enabled: r.enabled,
     positive_node: r.positive_node.trim(),
@@ -336,6 +357,7 @@ async function doUpload() {
       tag_style: upStyle.value,
       size_preset: upPreset.value,
       prompt_profile: upProfile.value,
+      subject_scope: upScope.value,
       default_negative: upNegative.value,
       enabled: true,
     });
@@ -369,6 +391,7 @@ function effHint(r: TmplRow): string {
   if (p.label) bits.push(`底模画像 ${p.label}`);
   bits.push(`提示词 ${r.eff_style || r.tag_style}`);
   bits.push(`尺寸 ${r.eff_preset || r.size_preset}`);
+  bits.push(`题材能力 ${SCOPE_LABEL[r.eff_scope || r.subject_scope] || "自动"}`);
   if (r.quality_prefix) bits.push("自动加质量词");
   return bits.join(" · ");
 }
@@ -442,6 +465,11 @@ onMounted(reloadAll);
             <span class="label">提示词适配</span>
             <n-select v-model:value="animaProfile" :options="profileOptions" size="small" />
             <span class="mp-sub">自动 = 萌绘底模库判定优先，其次看底模文件名</span>
+          </label>
+          <label class="mp-field">
+            <span class="label">题材能力</span>
+            <n-select v-model:value="animaScope" :options="scopeOptions" size="small" />
+            <span class="mp-sub">自动 = 按各条底模推断能画动漫还是真人；也可整体强制指定</span>
           </label>
         </div>
         <div class="mp-row" style="margin-top: 10px">
@@ -530,6 +558,11 @@ onMounted(reloadAll);
         <label class="mp-field">
           <span class="label">提示词适配</span>
           <n-select v-model:value="upProfile" :options="profileOptions" size="small" />
+        </label>
+        <label class="mp-field">
+          <span class="label">题材能力（能画什么）</span>
+          <n-select v-model:value="upScope" :options="scopeOptions" size="small" />
+          <span class="mp-sub">动漫底模别选「真人」，否则会被派去画写真</span>
         </label>
         <label class="mp-field">
           <span class="label">尺寸预设</span>
@@ -637,6 +670,11 @@ onMounted(reloadAll);
             <span class="label">提示词适配</span>
             <n-select v-model:value="r.prompt_profile" :options="profileOptions" size="small" />
             <span class="mp-sub">自动 = 按底模文件名判断风格与尺寸</span>
+          </label>
+          <label class="mp-field">
+            <span class="label">题材能力（能画什么）</span>
+            <n-select v-model:value="r.subject_scope" :options="scopeOptions" size="small" />
+            <span class="mp-sub">抽签时只从能力匹配的类别里挑，避免动漫工作流抽到写真</span>
           </label>
           <label class="mp-field">
             <span class="label">尺寸预设</span>

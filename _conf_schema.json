@@ -69,6 +69,68 @@
     },
     "default": {}
   },
+  "prompt": {
+    "description": "提示词与人物设定",
+    "type": "object",
+    "hint": "自定义系统提示词、统一人物设定。WebUI「提示词」页有图形化编辑与试跑",
+    "items": {
+      "persona_enabled": {
+        "description": "启用人物锚定",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后：系统提示词写入人物规则，动漫标签风格另固定前置人物标签并追加排除负面词（仅对少女/写真/角色类题材生效，不破坏风景与老人肖像）"
+      },
+      "persona_text": {
+        "description": "人物规则（追加进系统提示词）",
+        "type": "text",
+        "default": "【人物设定·最高优先级】若画面中出现人物，人物一律为东亚面孔的年轻成年女性（18 岁以上），单人，无男性、无儿童、无中老年，不要其他人种或族裔。此条优先于题材与风格描述里的任何人物设定。涉及泳装、居家或室内写真时，保持自然、生活化的日常表达，不写任何露骨或性暗示内容。",
+        "hint": "三种提示词风格通用的中文规则；留空则只靠下面的标签与负面词硬约束"
+      },
+      "persona_tags": {
+        "description": "人物固定标签（仅 Danbooru）",
+        "type": "string",
+        "default": "1girl, solo, asian, east asian, young adult woman, adult female",
+        "hint": "danbooru 风格下固定加在提示词前部；其他风格靠上面的中文规则"
+      },
+      "persona_negative": {
+        "description": "人物排除负面词",
+        "type": "string",
+        "default": "old woman, elderly, mature female, milf, child, loli, underage, toddler, 1boy, male, caucasian, western, dark skin",
+        "hint": "固定追加到 LLM 给的 negative 后面（自动去重）；主要用来挡住其他人种、中老年与未成年"
+      },
+      "persona_negative_zh": {
+        "description": "人物排除负面词（中文风格）",
+        "type": "string",
+        "default": "儿童，未成年，中老年女性，男性，其他族裔",
+        "hint": "Qwen-Image 等中文自然语言风格下改用这串中文排除词，避免中英混杂"
+      },
+      "extra_rules": {
+        "description": "自定义规则（追加）",
+        "type": "text",
+        "default": "",
+        "hint": "追加到三套内置系统提示词的规则段，输出契约始终保留；想加「画什么、别画什么」写这里最省事"
+      },
+      "override_danbooru": {
+        "description": "完全覆盖 · 动漫标签系",
+        "type": "text",
+        "default": "",
+        "hint": "高级：非空则完全替换 danbooru 的系统提示词。若你的文本里没写 JSON 输出契约，插件会自动补上契约段"
+      },
+      "override_natural": {
+        "description": "完全覆盖 · 中文自然语言",
+        "type": "text",
+        "default": "",
+        "hint": "高级：非空则完全替换 natural / natural_zh 的系统提示词"
+      },
+      "override_natural_en": {
+        "description": "完全覆盖 · 英文自然语言",
+        "type": "text",
+        "default": "",
+        "hint": "高级：非空则完全替换 natural_en 的系统提示词"
+      }
+    },
+    "default": {}
+  },
   "schedule": {
     "description": "定时计划（什么时候画）",
     "type": "object",
@@ -162,6 +224,13 @@
         "options": ["auto", "danbooru", "natural", "natural_en"],
         "default": "auto",
         "hint": "auto = 按底模自动（萌绘底模库的「提示词风格/danbooru 适配」优先，其次看底模文件名）；其余为强制指定"
+      },
+      "subject_scope": {
+        "description": "萌绘工作流的题材能力",
+        "type": "string",
+        "options": ["auto", "anime", "photo", "both"],
+        "default": "auto",
+        "hint": "跟随萌绘的工作流无法逐条标记，用这里整体指定：auto=按各条底模推断；anime=只画动漫题材；photo=只画真人题材；both=不限制"
       }
     },
     "default": {}
@@ -210,6 +279,13 @@
         "options": ["auto", "danbooru", "natural", "natural_en"],
         "default": "auto",
         "hint": "auto=按工作流里的底模文件名自动判断提示词风格与尺寸（认不出才用上面的手填值）；其余为强制指定"
+      },
+      "subject_scope": {
+        "description": "题材能力（能画什么）",
+        "type": "string",
+        "options": ["auto", "anime", "photo", "both"],
+        "default": "auto",
+        "hint": "auto=按底模推断（动漫底模只能画动漫、写实底模只能画真人、Flux/Qwen 等通吃）；也可强制指定。抽签时只从能力匹配的类别里挑，避免「动漫工作流抽到写真」"
       },
       "size_preset": {
         "description": "尺寸预设（auto 识别到底模时会被覆盖）",
@@ -266,6 +342,8 @@
         "name": "anima 默认",
         "file": "anima_t2i.json",
         "tag_style": "danbooru",
+        "prompt_profile": "auto",
+        "subject_scope": "auto",
         "size_preset": "sdxl",
         "default_negative": "",
         "enabled": true
@@ -275,7 +353,7 @@
   "theme": {
     "description": "主题词池",
     "type": "object",
-    "hint": "多样性抽签的词池扩充与停用（内置 9 大类：风景场景/宇宙星空/美少女/动漫少女/真人少女/人物肖像/艺术创意/自然生态）",
+    "hint": "多样性抽签的词池扩充与停用（内置 11 类：风景场景/宇宙星空/美少女/动漫少女/真人少女/写真摄影/动漫角色/游戏角色/人物肖像/艺术创意/自然生态）。WebUI「主题词池」页有图形化题材清单",
     "items": {
       "disabled_categories": {
         "description": "停用类别",
@@ -286,8 +364,20 @@
       "category_weights": {
         "description": "类别权重",
         "type": "string",
-        "default": "美少女=5,动漫少女=4,真人少女=3,人物肖像=1,风景场景=1,宇宙星空=1,艺术创意=1,自然生态=1",
-        "hint": "格式「类别=权重」，逗号分隔；没写到的类别按 1 算，权重 0 = 不抽（也可以直接用上面的停用）。默认偏向少女题材（动漫:真人≈3:1）"
+        "default": "美少女=5,动漫少女=4,真人少女=3,写真摄影=2,动漫角色=1,游戏角色=1,人物肖像=1,风景场景=1,宇宙星空=1,艺术创意=1,自然生态=1",
+        "hint": "格式「类别=权重」，逗号分隔；没写到的类别按 1 算，权重 0 = 不抽（也可以直接用上面的停用）。默认偏向少女题材，写真与角色类保底参与"
+      },
+      "category_scopes": {
+        "description": "类别题材能力覆盖",
+        "type": "string",
+        "default": "",
+        "hint": "格式「类别=anime|photo|both」，逗号分隔。内置已标好（动漫角色只走动漫工作流、写真摄影只走真人工作流）；只给自定义类别或想改内置标记时才需要写"
+      },
+      "character_names": {
+        "description": "角色名单（可删改）",
+        "type": "text",
+        "default": "动漫角色=初音未来,巡音流歌,阿尔托莉雅·潘德拉贡,葛城美里,蕾姆,拉姆,壹原侑子,牧濑红莉栖,时崎狂三,波雅·汉库克,妮可·罗宾,娜美\n游戏角色=甘雨,胡桃,雷电将军,刻晴,八重神子,神里绫华,荧,莫娜,优菈,宵宫,2B,蒂法·洛克哈特,爱丽丝·盖恩斯巴勒,玛修·基列莱特,贞德·达尔克,贝优妮塔",
+        "hint": "每行「类别=角色名,角色名…」，会自动并入对应类别的题材池；删掉某行即停用该类角色名。角色名只作画风标签，人物锚定仍会强制成年化，请勿用于生成未成年人不当内容"
       },
       "extra_words": {
         "description": "词池扩充",

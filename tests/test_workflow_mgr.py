@@ -246,5 +246,36 @@ with tempfile.TemporaryDirectory() as td:
     check("forced_profile_size", forced.size_preset == "sdxl", forced.size_preset)
     check("forced_profile_quality", "masterpiece" in forced.quality_prefix, forced.quality_prefix)
 
+# ---------- v0.7.3：模板题材能力（问题 2） ----------
+check("scope_family_anime", workflow_mgr.scope_for_family("anime") == "anime")
+check("scope_family_photoreal", workflow_mgr.scope_for_family("photoreal") == "photo")
+for fam in ("flux", "qwen", "sd3", "unknown"):
+    check(f"scope_family_{fam}", workflow_mgr.scope_for_family(fam) == "both")
+check("resolve_scope_auto_anime", workflow_mgr.resolve_scope("auto", "anime") == "anime")
+check("resolve_scope_auto_unknown", workflow_mgr.resolve_scope("auto", "unknown") == "both")
+check("resolve_scope_forced", workflow_mgr.resolve_scope("photo", "anime") == "photo")
+check("resolve_scope_garbage", workflow_mgr.resolve_scope("乱写", "anime") == "anime")
+check("resolve_scope_empty", workflow_mgr.resolve_scope("", "photoreal") == "photo")
+
+with tempfile.TemporaryDirectory() as td:
+    wf_dir = Path(td) / "workflows"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    (wf_dir / "a.json").write_text(json.dumps(wf), encoding="utf-8")
+    (wf_dir / "f.json").write_text(json.dumps(flux_wf), encoding="utf-8")
+
+    a = workflow_mgr.load_templates(
+        wf_dir, [{"name": "动漫", "file": "a.json", "enabled": True}], root() / "builtin")[0]
+    check("load_scope_anime_auto", a.scope == "anime", a.scope)
+    f = workflow_mgr.load_templates(
+        wf_dir, [{"name": "通用", "file": "f.json", "enabled": True}], root() / "builtin")[0]
+    check("load_scope_flux_auto", f.scope == "both", f.scope)
+    a2 = workflow_mgr.load_templates(
+        wf_dir, [{"name": "动漫", "file": "a.json", "subject_scope": "photo", "enabled": True}],
+        root() / "builtin")[0]
+    check("load_scope_manual_override", a2.scope == "photo" and a2.subject_scope == "photo", a2.scope)
+    pub = a.to_public()
+    check("public_exposes_scope", pub.get("scope") == "anime" and pub.get("subject_scope") == "auto",
+          str(pub.get("scope")))
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

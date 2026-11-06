@@ -438,6 +438,7 @@ async def h_workflow_upload(plugin) -> dict:
         default_negative=str(body.get("default_negative") or ""),
         enabled=_bool_of(body.get("enabled", True), True),
         prompt_profile=str(body.get("prompt_profile") or "auto"),
+        subject_scope=str(body.get("subject_scope") or "auto"),
     )
     return ok(res) if res.get("ok") else err(res.get("error") or "入库失败")
 
@@ -641,6 +642,37 @@ async def h_anima_sync(plugin) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 词池 / 提示词（只读）
+# --------------------------------------------------------------------------- #
+
+async def h_theme_pool(plugin) -> dict:
+    """GET /theme/pool：内置词池全貌，给「主题词池」页画题材清单。"""
+    from . import prompter
+    return ok(prompter.theme_pool(plugin._category_scopes()))
+
+
+async def h_prompt_preview(plugin) -> dict:
+    """GET /prompt/preview：三种风格下「当前真正生效」的系统提示词。
+
+    追加规则 / 完全覆盖都算进去，用户改完能在页面上直接看到 LLM 会收到什么。
+    """
+    from . import prompter
+    opts = plugin._prompt_opts()
+    labels = {
+        "danbooru": "动漫标签系（Danbooru）",
+        "natural": "中文自然语言（Qwen）",
+        "natural_en": "英文自然语言（Flux / 写实）",
+    }
+    return ok({
+        "styles": [
+            {"key": k, "label": v, "prompt": prompter.build_system_prompt(k, opts)}
+            for k, v in labels.items()
+        ],
+        "persona_enabled": prompter.opt_bool(opts.get("persona_enabled"), True),
+    })
+
+
+# --------------------------------------------------------------------------- #
 # 调试
 # --------------------------------------------------------------------------- #
 
@@ -716,6 +748,8 @@ def register(plugin) -> None:
         ("/anima/workflows", h_anima_workflows, ["GET"]),
         ("/config", h_get_config, ["GET"]),
         ("/config", h_set_config, ["POST"]),
+        ("/theme/pool", h_theme_pool, ["GET"]),
+        ("/prompt/preview", h_prompt_preview, ["GET"]),
         ("/providers", h_providers, ["GET"]),
         ("/anima", h_anima, ["GET"]),
         ("/anima/sync", h_anima_sync, ["POST"]),

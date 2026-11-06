@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.2",
+    "v0.7.3",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -491,6 +491,8 @@ class MoePaintPlugin(Star):
         else:
             tag_style = mode
         quality = str(profile.get("quality_prefix") or "") if tag_style == "danbooru" else ""
+        # 跟随萌绘的工作流没法逐条标记能力，用 anima.subject_scope 整体指定（默认按底模推断）
+        scope_cfg = str(acfg.get("subject_scope") or "auto").strip().lower() or "auto"
         return workflow_mgr.Template(
             name=name,
             file=f"anima:{bid or '?'}",
@@ -507,6 +509,8 @@ class MoePaintPlugin(Star):
             prompt_profile=mode,
             profile=profile,
             quality_prefix=quality,
+            subject_scope=scope_cfg,
+            scope=workflow_mgr.resolve_scope(scope_cfg, profile.get("family")),
         )
 
     # ------------------------------------------------------------------ #
@@ -641,7 +645,8 @@ class MoePaintPlugin(Star):
             raise RuntimeError("没有可用 LLM 提供商（先在 WebUI 配置好对话模型，或在本插件配置里指定 provider_id）")
         pid = str(self._sub("llm").get("provider_id") or "").strip()
         label = pid or "全局默认"
-        sys_prompt = prompter.build_system_prompt(tpl.tag_style)
+        opts = self._prompt_opts()
+        sys_prompt = prompter.build_system_prompt(tpl.tag_style, opts)
         user_prompt = prompter.build_user_prompt(brief)
         t0 = time.monotonic()
         try:
@@ -657,6 +662,9 @@ class MoePaintPlugin(Star):
             )
             payload = prompter.parse_llm_payload(text)
         payload["_raw"] = text[:4000]
+        # 人物锚定是硬约束（补人物标签 + 排除负面词），先于质量词落地；
+        # 质量词由 apply_quality_prefix 放到最前，故两者不会互相覆盖。
+        payload = prompter.apply_persona(payload, tpl.tag_style, brief, opts)
         # danbooru 系补质量词（系统提示里承诺「由系统添加」，这里真正落地）
         payload["prompt"] = prompter.apply_quality_prefix(
             payload.get("prompt", ""), getattr(tpl, "quality_prefix", "")
@@ -682,6 +690,8 @@ class MoePaintPlugin(Star):
                 disabled_categories=self._disabled_categories(),
                 extra=self._theme_extra(),
                 weights=self._category_weights(),
+                scope=getattr(tpl, "scope", "both"),
+                scopes=self._category_scopes(),
             )
             if str(theme or "").strip():
                 brief["category"] = "自定义"
@@ -811,6 +821,7 @@ class MoePaintPlugin(Star):
         default_negative: str = "",
         enabled: bool = True,
         prompt_profile: str = "auto",
+        subject_scope: str = "auto",
     ) -> dict:
         """上传入库：解析 → 落盘 workflows/<名>.json → 更新清单 → 重载。"""
         name = str(name or "").strip()[:60]
@@ -836,6 +847,7 @@ class MoePaintPlugin(Star):
             "tag_style": str(tag_style or "danbooru"),
             "size_preset": str(size_preset or "sdxl"),
             "prompt_profile": str(prompt_profile or "auto"),
+            "subject_scope": str(subject_scope or "auto"),
             "default_negative": str(default_negative or "").strip(),
             "enabled": bool(enabled),
         }
@@ -934,6 +946,8 @@ class MoePaintPlugin(Star):
                 disabled_categories=self._disabled_categories(),
                 extra=self._theme_extra(),
                 weights=self._category_weights(),
+                scope=getattr(tpl, "scope", "both"),
+                scopes=self._category_scopes(),
             )
             if theme.strip():
                 brief["category"] = "自定义"
@@ -1087,9 +1101,46 @@ class MoePaintPlugin(Star):
             logger.warning(f"{PLUGIN_TAG} 类别权重解析失败（按均匀抽签）: {e}")
             return {}
 
+    def _category_scopes(self) -> dict:
+        """类别题材能力覆盖（theme.category_scopes，格式「类别=anime|photo|both」）。"""
+        try:
+            return prompter.parse_scopes(self._sub("theme").get("category_scopes"))
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 类别能力解析失败（按内置映射）: {e}")
+            return {}
+
+    def _prompt_opts(self) -> dict:
+        """提示词与人物锚定配置。老配置没有 prompt 分组时用代码默认值兜底。"""
+        sub = self._cfg().get("prompt")
+        if isinstance(sub, dict):
+            return sub
+        return {
+            "persona_enabled": True,
+            "persona_text": prompter.DEFAULT_PERSONA_TEXT,
+            "persona_tags": prompter.DEFAULT_PERSONA_TAGS,
+            "persona_negative": prompter.DEFAULT_PERSONA_NEGATIVE,
+            "persona_negative_zh": prompter.DEFAULT_PERSONA_NEGATIVE_ZH,
+            "extra_rules": "",
+        }
+
     def _theme_extra(self) -> dict:
-        raw = self._sub("theme").get("extra_words")
-        return raw if isinstance(raw, dict) else {}
+        """词池扩充 + 角色名单，统一并成「类别 → 逗号分隔词」交给 draw_brief。
+
+        角色名单放在配置里而不是代码里，用户删改某一行即刻生效；
+        内置的通用角色原型仍在 CATEGORIES 里，不会被名单删掉。
+        """
+        cfg = self._sub("theme")
+        raw = cfg.get("extra_words")
+        extra = dict(raw) if isinstance(raw, dict) else {}
+        names_raw = cfg.get("character_names")
+        if names_raw is None:
+            names_raw = prompter.DEFAULT_CHARACTER_NAMES
+        for cat, words in prompter.parse_kv_words(names_raw).items():
+            if not words:
+                continue
+            cur = str(extra.get(cat) or "").strip().strip(",")
+            extra[cat] = (cur + "," if cur else "") + ",".join(words)
+        return extra
 
     @staticmethod
     def _int_of(sub: dict, key: str, default: int, lo: int = 0, hi: int = 10**9) -> int:

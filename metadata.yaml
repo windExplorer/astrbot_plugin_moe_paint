@@ -2,7 +2,7 @@ name: astrbot_plugin_moe_paint # 插件唯一识别名，与目录名一致
 display_name: 萌萌绘卷 # 展示名
 desc: 定时自动绘图：LLM 生成高质量提示词与尺寸（场景/风景/星空/美少女/艺术），轮换工作流交 ComfyUI 出图，成功后投递白名单会话，内置生成记录图库 WebUI。
 short_desc: 定时用 LLM 生成提示词自动绘图并投递白名单会话，内置生成记录图库。
-version: v0.7.2 # 版本唯一来源（格式 vX.Y.Z），CHANGELOG 与包名由此派生
+version: v0.7.3 # 版本唯一来源（格式 vX.Y.Z），CHANGELOG 与包名由此派生
 author: windExplorer # 须与插件市场 GitHub 用户名一致
 repo: https://github.com/windExplorer/astrbot_plugin_moe_paint
 category: ai_tools # 英文枚举：ai_tools/utilities/productivity/integrations/entertainment/other

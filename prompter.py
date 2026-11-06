@@ -49,7 +49,29 @@ CATEGORIES: dict[str, list[str]] = {
         "街头抓拍的走路瞬间", "海边黄昏的逆光侧影",
         "图书馆书架间的安静半身像", "雨天玻璃窗后的少女",
         "居家白衬衫的慵懒午后", "天台栏杆边的城市背景人像",
-        "秋日公园长椅上的毛衣少女", "夜晚便利店门口的霓虹光人像",
+        "秋日公园长椅上的毛衣少女",         "夜晚便利店门口的霓虹光人像",
+    ],
+    # v0.7.3：写真/角色三条线。题材一律写成成年、生活化、自然光的日常表达；
+    # 泳装与室内写真只给「清爽 / 剪影 / 晨光」这类中性描述，不写任何露骨内容。
+    "写真摄影": [
+        "居家白衬衫的自然光写真", "窗边逆光的安静侧脸", "胶片质感的街头抓拍",
+        "夏日泳池边的清爽泳装写真", "海边黄昏的泳装剪影", "旅拍小镇的午后街角",
+        "影棚柔光的极简人像", "咖啡馆靠窗的阅读侧影", "雨天玻璃窗后的柔和人像",
+        "卧室晨光里的慵懒居家写真", "公园树影下的连衣裙人像", "日系清新的天台随拍",
+    ],
+    # 角色线：内置的是「通用原型 + 场景」，具体角色名由 theme.character_names 注入，
+    # 让用户能自由删改，也避免把一长串 IP 名单写死在代码里。
+    "动漫角色": [
+        "魔法少女在夜色屋顶抬手", "神社巫女在樱花树下回身", "学院偶像在舞台聚光灯下",
+        "女仆在复古洋馆端着红茶", "剑士在晨雾山道拔剑", "异世界冒险者在营火旁摊开地图",
+        "机甲驾驶员在驾驶舱回望", "和服少女在祭典灯火间", "图书委员在闭馆前的书架间",
+        "乐队主唱在排练室调弦", "白衣研究员在温室里记笔记", "猫耳少女在雨后巷口撑伞",
+    ],
+    "游戏角色": [
+        "弓手在雪山垭口拉弓", "法师在星夜塔顶点亮法阵", "骑士在古城台阶上持盾",
+        "街头赛车手在霓虹隧道回眸", "咖啡店店员在打烊后擦拭杯子", "潜水员在沉船舷窗边",
+        "机械师在机库里检修装甲", "舞者在空中回廊旋身", "占卜师在烛光下摊牌",
+        "忍者在竹林月下跃起", "旅行者在驿站摊开地图", "治疗师在晨光病房里整理药箱",
     ],
     "人物肖像": [
         "老画师沾满颜料的手与画笔", "爵士酒吧里的萨克斯手", "图书管理员与高耸书架",
@@ -80,18 +102,64 @@ STYLES: list[str] = [
 STYLES_ANIME: list[str] = [
     "赛璐璐动画风", "厚涂插画", "水彩淡彩", "新海诚式光影", "吉卜力式温暖",
     "浮世绘色块", "皮克斯式 3D 质感", "动态漫画分镜感",
+    "角色立绘感", "游戏 CG 质感", "轻小说插画风", "动画关键帧质感",
 ]
 STYLES_PHOTO: list[str] = [
     "胶片摄影颗粒感", "自然光人像摄影", "电影感浅景深", "柔焦逆光写真",
-    "窗边柔光写真",
+    "窗边柔光写真", "日系清新写真", "杂志人像大片", "黑白人像摄影",
+    "旅拍纪实感", "室内自然光写真",
 ]
 
 CATEGORY_STYLE_GROUP: dict[str, str] = {
     "美少女": "anime",
     "动漫少女": "anime",
+    "动漫角色": "anime",
+    "游戏角色": "anime",
     "真人少女": "photo",
+    "写真摄影": "photo",
     "人物肖像": "photo",
 }
+
+# 题材能力：类别需要什么类型的底模。未列出的类别一律 both。
+# anime = 只能由动漫系底模画（角色、二次元少女）；photo = 只能由写实底模画（写真、肖像）。
+CATEGORY_SCOPE: dict[str, str] = {
+    "美少女": "anime",
+    "动漫少女": "anime",
+    "动漫角色": "anime",
+    "游戏角色": "anime",
+    "真人少女": "photo",
+    "写真摄影": "photo",
+    "人物肖像": "photo",
+}
+
+# 人物锚定的硬约束只对「明确要画年轻女性」的类别生效：
+# 风景/星空/生态是纯景物，硬塞 1girl 会毁掉画面；人物肖像里有老人与男性，也不能套少女标签。
+PERSON_CATEGORIES: set[str] = {
+    "美少女", "动漫少女", "真人少女", "写真摄影", "动漫角色", "游戏角色",
+}
+
+SCOPES_VALID = ("anime", "photo", "both")
+
+DEFAULT_PERSONA_TEXT = (
+    "【人物设定·最高优先级】若画面中出现人物，人物一律为东亚面孔的年轻成年女性"
+    "（18 岁以上），单人，无男性、无儿童、无中老年，不要其他人种或族裔。"
+    "此条优先于题材与风格描述里的任何人物设定。涉及泳装、居家或室内写真时，"
+    "保持自然、生活化的日常表达，不写任何露骨或性暗示内容。"
+)
+DEFAULT_PERSONA_TAGS = "1girl, solo, asian, east asian, young adult woman, adult female"
+DEFAULT_PERSONA_NEGATIVE = (
+    "old woman, elderly, mature female, milf, child, loli, underage, toddler, "
+    "1boy, male, caucasian, western, dark skin"
+)
+DEFAULT_PERSONA_NEGATIVE_ZH = "儿童，未成年，中老年女性，男性，其他族裔"
+# 与 _conf_schema.json 的 theme.character_names 默认值保持一致（test_schema 会校验）。
+# 老配置没这个键时用它兜底，升级后不用手动补配置也能抽到角色名。
+DEFAULT_CHARACTER_NAMES = (
+    "动漫角色=初音未来,巡音流歌,阿尔托莉雅·潘德拉贡,葛城美里,蕾姆,拉姆,"
+    "壹原侑子,牧濑红莉栖,时崎狂三,波雅·汉库克,妮可·罗宾,娜美\n"
+    "游戏角色=甘雨,胡桃,雷电将军,刻晴,八重神子,神里绫华,荧,莫娜,优菈,宵宫,2B,"
+    "蒂法·洛克哈特,爱丽丝·盖恩斯巴勒,玛修·基列莱特,贞德·达尔克,贝优妮塔"
+)
 
 
 def style_pool_for(category: str) -> list:
@@ -102,6 +170,75 @@ def style_pool_for(category: str) -> list:
     if group == "photo":
         return STYLES_PHOTO
     return STYLES
+
+
+def scope_of(category: str, scopes: dict | None = None) -> str:
+    """类别 → 题材能力（配置 theme.category_scopes 可覆盖内置映射）。"""
+    v = str((scopes or {}).get(category) or CATEGORY_SCOPE.get(category, "both")).strip().lower()
+    return v if v in SCOPES_VALID else "both"
+
+
+def scope_allows(workflow_scope: str, category: str, scopes: dict | None = None) -> bool:
+    """工作流能力 × 类别需求：both 永远放行，其余必须同类。"""
+    ws = str(workflow_scope or "both").strip().lower()
+    if ws not in ("anime", "photo"):
+        return True
+    need = scope_of(category, scopes)
+    return need in ("both", ws)
+
+
+def parse_scopes(raw) -> dict:
+    """解析「类别=anime|photo|both」文本（或字典）；非法值丢弃。"""
+    items = list(raw.items()) if isinstance(raw, dict) else [
+        (p.partition("=")[0], p.partition("=")[2])
+        for p in re.split(r"[,，;；\n\r]+", str(raw or "")) if p.strip()
+    ]
+    out: dict[str, str] = {}
+    for name, val in items:
+        key, v = str(name).strip(), str(val).strip().lower()
+        if key and v in SCOPES_VALID:
+            out[key] = v
+    return out
+
+
+def parse_kv_words(raw) -> dict:
+    """「键=词1,词2」每行一条（也兼容逗号分隔多行）→ {键: [词…]}。
+
+    用于 theme.character_names：角色名单按类别注入题材池，用户可直接删改配置文本。
+    """
+    out: dict[str, list[str]] = {}
+    for line in str(raw or "").replace("，", ",").splitlines():
+        name, sep, val = line.partition("=")
+        if not sep:
+            name, sep, val = line.partition("：")
+        key = str(name).strip()
+        if not sep or not key:
+            continue
+        words = [w.strip() for w in str(val or "").split(",") if w.strip()]
+        if words:
+            out.setdefault(key, []).extend(words)
+    return out
+
+
+def theme_pool(scopes: dict | None = None) -> dict:
+    """给 WebUI 的词池全貌（内置类别 / 题材 / 风格组 / 能力 / 四个附加层）。"""
+    return {
+        "categories": [
+            {
+                "name": name,
+                "subjects": list(words),
+                "style_group": CATEGORY_STYLE_GROUP.get(name, "all"),
+                "scope": scope_of(name, scopes),
+            }
+            for name, words in CATEGORIES.items()
+        ],
+        "layers": {
+            "风格": {"all": list(STYLES), "anime": list(STYLES_ANIME), "photo": list(STYLES_PHOTO)},
+            "光色": list(LIGHTS),
+            "氛围": list(MOODS),
+            "构图": [f"{n}@{o}" for n, o in COMPOSITIONS],
+        },
+    }
 
 # 构图层：每项带朝向（orientation 是尺寸白名单的键，LLM 不参与决定）
 COMPOSITIONS: list[tuple[str, str]] = [
@@ -187,7 +324,8 @@ def _merge_words(default: list, extra: str | None) -> list:
 # 默认类别权重：少女题材占大头（动漫:真人 ≈ 3:1），其余类别各 1 保底多样性。
 # 用户可在「主题词池」页改成任意「类别=权重」。
 DEFAULT_CATEGORY_WEIGHTS = (
-    "美少女=5,动漫少女=4,真人少女=3,人物肖像=1,风景场景=1,宇宙星空=1,艺术创意=1,自然生态=1"
+    "美少女=5,动漫少女=4,真人少女=3,写真摄影=2,动漫角色=1,游戏角色=1,"
+    "人物肖像=1,风景场景=1,宇宙星空=1,艺术创意=1,自然生态=1"
 )
 
 
@@ -251,6 +389,8 @@ def draw_brief(
     disabled_categories: set[str] | None = None,
     extra: dict | None = None,
     weights: dict | None = None,
+    scope: str = "both",
+    scopes: dict | None = None,
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -260,10 +400,16 @@ def draw_brief(
     - 「风格」「光色」「氛围」→ 追加对应层的词；
     - 「构图」→ 追加构图项，格式「名称@landscape|portrait|square」。
     weights（配置 theme.category_weights）：类别 → 权重，缺省 1.0；停用的类别无论如何都不抽。
+    scope（当次工作流的能力 anime / photo / both）：先按能力筛掉画不了的类别再加权抽。
+    scopes（配置 theme.category_scopes）：类别 → 能力覆盖，自定义类别可用它标记。
     """
     extra = extra or {}
     disabled = disabled_categories or set()
     weights = weights or {}
+    scopes = scopes or {}
+    wf_scope = str(scope or "both").strip().lower()
+    if wf_scope not in ("anime", "photo", "both"):
+        wf_scope = "both"
 
     # 类别池：内置 + extra 新类别，跳过停用
     cat_pool: dict[str, list[str]] = {}
@@ -282,6 +428,13 @@ def draw_brief(
             cat_pool[key] = items
     if not cat_pool:
         cat_pool = dict(CATEGORIES)
+
+    # 工作流能力闸门：动漫底模不抽写真、写实底模不抽二次元角色。
+    # 筛完为空说明用户把该能力下的类别全停了 —— 退回原池，绝不抽不出题材。
+    if wf_scope in ("anime", "photo"):
+        filtered = {k: v for k, v in cat_pool.items() if scope_allows(wf_scope, k, scopes)}
+        if filtered:
+            cat_pool = filtered
 
     category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
     subject = rng.choice(cat_pool[category])
@@ -305,6 +458,7 @@ def draw_brief(
         "orientation": orientation,
         "light": light,
         "mood": mood,
+        "scope": wf_scope,
     }
 
 
@@ -319,7 +473,7 @@ def brief_text(brief: dict, theme: str = "") -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 系统提示词（按模板 tag_style 二选一）
+# 系统提示词（三套内置 + 自定义规则 / 完全覆盖）
 # --------------------------------------------------------------------------- #
 
 _SYSTEM_COMMON_TAIL = """
@@ -329,38 +483,31 @@ _SYSTEM_COMMON_TAIL = """
 - negative 不确定就给空串。JSON 以外的任何字符都算错误。
 """
 
-
-def build_system_prompt(tag_style: str) -> str:
-    """按提示词风格给系统提示：danbooru=英文标签，natural/natural_zh=中文自然语言，
-    natural_en=英文自然语言（Flux / SD3 / 写实类底模）。"""
-    if tag_style in ("natural", "natural_zh"):
-        return (
-            "你是一位顶级 AI 绘画提示词工程师，为支持中文的模型（如 Qwen-Image）写文生图提示词。\n"
-            "用户会给你一份「创作简报」，请把它写成高质量的中文画面描述。\n"
-            "【prompt 要求】2~4 句连贯中文：主体与细节 → 环境与背景 → 镜头与构图 → "
-            "光线与氛围。严格贴合简报的题材/风格/构图/光色/氛围，不要偏题，"
-            "不要写成标签堆砌，总长 80~200 字。\n"
-            "【negative 要求】中文，只写常见缺陷（如：模糊，畸形，多余的手指，"
-            "低画质，水印），不确定就空串。\n" + _SYSTEM_COMMON_TAIL
-        )
-    if tag_style == "natural_en":
-        return (
-            "You are a top-tier prompt engineer writing text-to-image prompts for "
-            "natural-language models (Flux / SD3 / photorealistic SDXL checkpoints).\n"
-            "The user gives you a Chinese creative brief. Turn it into a high-quality "
-            "English prompt.\n"
-            "【prompt】2-4 flowing English sentences: subject and details -> environment "
-            "and background -> camera and composition -> lighting and mood. Follow the "
-            "brief's subject/style/composition/light/mood exactly; do not drift into a "
-            "generic portrait; no tag dumps, no artist names, 60-150 words.\n"
-            "【negative】English, short, only common defects (blurry, deformed, extra "
-            "fingers, low quality, watermark); empty string if unsure.\n"
-            "【caption】Remains Chinese, 20-40 characters, evocative, no tag lists.\n"
-            "【output】A single JSON object, no prose, no code fence:\n"
-            '{"prompt": "...", "negative": "...", "caption": "..."}\n'
-            "Any character outside that JSON object is a failure.\n"
-        )
-    return (
+# 三套「主体」：输出契约由 build_system_prompt 统一拼在末尾，附加规则插在契约前。
+_SYSTEM_BODIES: dict[str, str] = {
+    "natural": (
+        "你是一位顶级 AI 绘画提示词工程师，为支持中文的模型（如 Qwen-Image）写文生图提示词。\n"
+        "用户会给你一份「创作简报」，请把它写成高质量的中文画面描述。\n"
+        "【prompt 要求】2~4 句连贯中文：主体与细节 → 环境与背景 → 镜头与构图 → "
+        "光线与氛围。严格贴合简报的题材/风格/构图/光色/氛围，不要偏题，"
+        "不要写成标签堆砌，总长 80~200 字。\n"
+        "【negative 要求】中文，只写常见缺陷（如：模糊，畸形，多余的手指，"
+        "低画质，水印），不确定就空串。\n"
+    ),
+    "natural_en": (
+        "You are a top-tier prompt engineer writing text-to-image prompts for "
+        "natural-language models (Flux / SD3 / photorealistic SDXL checkpoints).\n"
+        "The user gives you a Chinese creative brief. Turn it into a high-quality "
+        "English prompt.\n"
+        "【prompt】2-4 flowing English sentences: subject and details -> environment "
+        "and background -> camera and composition -> lighting and mood. Follow the "
+        "brief's subject/style/composition/light/mood exactly; do not drift into a "
+        "generic portrait; no tag dumps, no artist names, 60-150 words.\n"
+        "【negative】English, short, only common defects (blurry, deformed, extra "
+        "fingers, low quality, watermark); empty string if unsure.\n"
+        "【caption】Remains Chinese, 20-40 characters, evocative, no tag lists.\n"
+    ),
+    "danbooru": (
         "你是一位顶级 AI 绘画提示词工程师，为动漫风格模型（Danbooru 标签系）写文生图提示词。\n"
         "用户会给你一份「创作简报」，请把它扩展成一条高质量英文 Danbooru 标签串。\n"
         "【prompt 要求】\n"
@@ -379,8 +526,97 @@ def build_system_prompt(tag_style: str) -> str:
         'horizon, thin clouds, no humans, wide shot, cinematic composition, '
         'beautiful detailed sky", "negative": "lowres, bad anatomy, watermark, '
         'jpeg artifacts", "caption": "银河在湖面落下一条光的路，山影安静得能听见星星。"}\n'
-        + _SYSTEM_COMMON_TAIL
-    )
+    ),
+}
+
+
+def _style_key(tag_style: str) -> str:
+    if tag_style in ("natural", "natural_zh"):
+        return "natural"
+    if tag_style == "natural_en":
+        return "natural_en"
+    return "danbooru"
+
+
+def opt_bool(v, default: bool = True) -> bool:
+    """配置里的 bool 可能是字符串（AstrBotConfig / WebUI 都出现过）。"""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
+
+
+def build_system_prompt(tag_style: str, opts: dict | None = None) -> str:
+    """按提示词风格给系统提示词。
+
+    opts（配置 prompt 分组）：
+    - ``override_<style>`` 非空 → 完全替换该风格的系统提示词；
+      若替换文本没写 JSON 输出契约，自动补上，避免整轮判失败。
+    - ``persona_enabled`` / ``persona_text`` → 人物锚定规则段；
+    - ``extra_rules`` → 用户自定义规则段；
+    两者都拼在「主体之后、输出契约之前」，优先级高于主体里的泛泛要求。
+    """
+    opts = opts or {}
+    key = _style_key(str(tag_style or ""))
+    override = str(opts.get(f"override_{key}") or "").strip()
+    if override:
+        if "json" not in override.lower():
+            override = override.rstrip() + "\n" + _SYSTEM_COMMON_TAIL.strip()
+        return override
+    body = _SYSTEM_BODIES[key]
+    rules: list[str] = []
+    if opt_bool(opts.get("persona_enabled"), True):
+        persona = str(opts.get("persona_text") or "").strip()
+        if persona:
+            rules.append(persona)
+    extra = str(opts.get("extra_rules") or "").strip()
+    if extra:
+        rules.append(extra)
+    if rules:
+        body += "\n【附加规则（优先于以上通用要求）】\n" + "\n".join(rules) + "\n"
+    return body + _SYSTEM_COMMON_TAIL
+
+
+def _merge_tags(text: str, tags: str, front: bool) -> str:
+    """把逗号分隔的标签补进文本，已存在的（不区分大小写）不重复加。"""
+    cur = str(text or "").strip().strip(",").strip()
+    parts = [t.strip() for t in str(tags or "").split(",") if t.strip()]
+    have = {t.strip().lower() for t in cur.split(",") if t.strip()}
+    missing = [t for t in parts if t.lower() not in have]
+    if not missing:
+        return cur
+    if not cur:
+        return ", ".join(missing)
+    return (", ".join(missing) + ", " + cur) if front else (cur + ", " + ", ".join(missing))
+
+
+def apply_persona(payload: dict, tag_style: str, brief: dict, opts: dict | None = None) -> dict:
+    """人物锚定的「硬约束」落地：补人物标签 + 追加排除负面词。
+
+    只对 PERSON_CATEGORIES 生效 —— 风景/星空/生态是纯景物，硬塞 1girl 会毁画面；
+    人物肖像类里有老人与男性，也不该套少女标签。
+    自然语言风格不往 prompt 里插标签（会破坏句子），靠系统提示词里的规则约束。
+    """
+    out = dict(payload or {})
+    opts = opts or {}
+    if not opt_bool(opts.get("persona_enabled"), True):
+        return out
+    if str((brief or {}).get("category") or "") not in PERSON_CATEGORIES:
+        return out
+    key = _style_key(str(tag_style or ""))
+    if key == "danbooru":
+        out["prompt"] = _merge_tags(
+            out.get("prompt", ""),
+            str(opts.get("persona_tags") or DEFAULT_PERSONA_TAGS),
+            True,
+        )
+    if key == "natural":
+        neg = str(opts.get("persona_negative_zh") or DEFAULT_PERSONA_NEGATIVE_ZH)
+    else:
+        neg = str(opts.get("persona_negative") or DEFAULT_PERSONA_NEGATIVE)
+    out["negative"] = _merge_tags(out.get("negative", ""), neg, False)
+    return out
 
 
 def build_user_prompt(brief: dict, theme: str = "") -> str:

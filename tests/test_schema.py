@@ -13,6 +13,8 @@ import json
 import sys
 from pathlib import Path
 
+from _loader import load
+
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "_conf_schema.json"
 
@@ -85,6 +87,10 @@ def main() -> int:
         ("comfyui", "url"),
         ("comfyui", "queue_defer_threshold"),
         ("llm", "provider_id"),
+        ("prompt", "persona_enabled"),
+        ("prompt", "persona_text"),
+        ("prompt", "extra_rules"),
+        ("prompt", "override_danbooru"),
         ("schedule", "mode"),
         ("schedule", "interval_minutes"),
         ("schedule", "daily_times"),
@@ -96,12 +102,16 @@ def main() -> int:
         ("anima", "workflow"),
         ("anima", "size_preset"),
         ("anima", "prompt_profile"),
+        ("anima", "subject_scope"),
         ("workflow_source",),
         ("delivery", "sessions"),
         ("gallery", "max_total_mb"),
         ("theme", "category_weights"),
         ("theme", "disabled_categories"),
+        ("theme", "category_scopes"),
+        ("theme", "character_names"),
         ("workflow_templates",),
+        ("workflow_templates", "items", "subject_scope"),
     ]
     def has_path(path: tuple) -> bool:
         """在 schema 里走 a.b.c：object 的子键挂在 items 下，两处都认。"""
@@ -142,8 +152,22 @@ def main() -> int:
             "安静时段默认开启",
             conf.get("schedule", {}).get("quiet_enabled") is True,
         )
+        check("默认配置含 prompt 分组", isinstance(conf.get("prompt"), dict))
+        check("人物锚定默认开启", conf.get("prompt", {}).get("persona_enabled") is True)
     except Exception as e:
         check("可被 AstrBot 解析成默认配置", False, f"{type(e).__name__}: {e}")
+
+    # 老配置没有新键时，代码里的兜底常量必须与 schema 默认值一致，否则升级前后行为会漂
+    prompter = load("prompter")
+    ps = schema["prompt"]["items"]
+    check("persona_text 默认值与代码常量一致",
+          ps["persona_text"]["default"] == prompter.DEFAULT_PERSONA_TEXT)
+    check("persona_tags 默认值与代码常量一致",
+          ps["persona_tags"]["default"] == prompter.DEFAULT_PERSONA_TAGS)
+    check("persona_negative 默认值与代码常量一致",
+          ps["persona_negative"]["default"] == prompter.DEFAULT_PERSONA_NEGATIVE)
+    check("character_names 默认值与代码常量一致",
+          schema["theme"]["items"]["character_names"]["default"] == prompter.DEFAULT_CHARACTER_NAMES)
 
     return summarize()
 

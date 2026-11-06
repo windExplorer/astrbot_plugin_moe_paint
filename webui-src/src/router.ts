@@ -9,6 +9,7 @@ import ServicesView from "./views/ServicesView.vue";
 import DeliveryView from "./views/DeliveryView.vue";
 import WorkflowsView from "./views/WorkflowsView.vue";
 import ThemeView from "./views/ThemeView.vue";
+import PromptView from "./views/PromptView.vue";
 import AnimaView from "./views/AnimaView.vue";
 import DebugView from "./views/DebugView.vue";
 
@@ -27,6 +28,7 @@ export const MENU: MenuItem[] = [
   { key: "/services", label: "生成服务", icon: "🎛️", group: "配置" },
   { key: "/workflows", label: "工作流模板", icon: "🧩", group: "配置" },
   { key: "/theme", label: "主题词池", icon: "🎨", group: "配置" },
+  { key: "/prompt", label: "提示词", icon: "✍️", group: "配置" },
   { key: "/anima", label: "关联萌绘", icon: "🪄", group: "联动" },
   { key: "/debug", label: "调试与日志", icon: "🧪", group: "联动" },
 ];
@@ -72,6 +74,7 @@ export const router = createRouter({
     { path: "/delivery", component: DeliveryView },
     { path: "/workflows", component: WorkflowsView },
     { path: "/theme", component: ThemeView },
+    { path: "/prompt", component: PromptView },
     { path: "/anima", component: AnimaView },
     { path: "/debug", component: DebugView },
     { path: "/:pathMatch(.*)*", redirect: "/overview" },

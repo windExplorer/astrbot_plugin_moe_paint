@@ -147,6 +147,8 @@ export interface TemplatePublic {
   prompt_profile?: string;
   profile?: Record<string, any>;
   quality_prefix?: string;
+  subject_scope?: string;
+  scope?: string;
 }
 
 export interface AnimaBrief {
@@ -412,6 +414,7 @@ export function apiWorkflowUpload(payload: {
   tag_style?: string;
   size_preset?: string;
   prompt_profile?: string;
+  subject_scope?: string;
   default_negative?: string;
   enabled?: boolean;
 }) {
@@ -427,6 +430,41 @@ export function apiWorkflowUpload(payload: {
 
 export function apiAnimaWorkflows() {
   return apiGet<AnimaWorkflowPayload>("/anima/workflows", 15000);
+}
+
+// ---------------------------------------------------------------- 词池 / 提示词
+
+export interface ThemePoolCategory {
+  name: string;
+  subjects: string[];
+  style_group: string;
+  scope: string;
+}
+
+export interface ThemePoolPayload {
+  categories: ThemePoolCategory[];
+  layers: Record<string, any>;
+}
+
+export interface PromptPreviewStyle {
+  key: string;
+  label: string;
+  prompt: string;
+}
+
+export interface PromptPreviewPayload {
+  styles: PromptPreviewStyle[];
+  persona_enabled: boolean;
+}
+
+/** 内置词池全貌（题材 / 风格组 / 题材能力 / 四个附加层）。 */
+export function apiThemePool() {
+  return apiGet<ThemePoolPayload>("/theme/pool", 15000);
+}
+
+/** 三种风格下当前真正生效的系统提示词（含追加规则与完全覆盖）。 */
+export function apiPromptPreview() {
+  return apiGet<PromptPreviewPayload>("/prompt/preview", 15000);
 }
 
 // ---------------------------------------------------------------- 配置

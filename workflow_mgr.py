@@ -110,6 +110,30 @@ def guess_profile(model_file: str, model_class: str = "") -> dict:
     return out
 
 
+# 题材能力：底模家族 → 它能画什么。动漫系画不出照片、写实系画不出二次元角色；
+# Flux / Qwen / SD3 是通用底模，两种都行；认不出来时不设限制（宁可让用户手填）。
+_SCOPE_BY_FAMILY: dict = {
+    "anime": "anime",
+    "photoreal": "photo",
+    "flux": "both",
+    "qwen": "both",
+    "sd3": "both",
+    "unknown": "both",
+}
+
+
+def scope_for_family(family: str) -> str:
+    return _SCOPE_BY_FAMILY.get(str(family or "unknown"), "both")
+
+
+def resolve_scope(configured: str, family: str) -> str:
+    """模板的 subject_scope + 底模家族 → 生效能力。auto = 按底模推断。"""
+    v = str(configured or "auto").strip().lower()
+    if v in ("anime", "photo", "both"):
+        return v
+    return scope_for_family(family)
+
+
 def _ref_target(ref) -> str:
     """ComfyUI 节点引用（如 ["3", 0]）→ 目标节点 id 字符串；非引用返回 ""。"""
     if isinstance(ref, (list, tuple)) and ref:
@@ -142,6 +166,8 @@ class Template:
     prompt_profile: str = "auto"  # auto / danbooru / natural / natural_en
     profile: dict = field(default_factory=dict)  # guess_profile 结果
     quality_prefix: str = ""  # danbooru 系自动加的质量词（其余为空）
+    subject_scope: str = "auto"  # 配置值 auto / anime / photo / both
+    scope: str = "both"  # 生效能力，抽签时用它筛类别
 
     def to_public(self) -> dict:
         """给 WebUI / 指令展示的公开形状（不含工作流 JSON 本体）。"""
@@ -154,6 +180,8 @@ class Template:
             "prompt_profile": self.prompt_profile,
             "profile": self.profile,
             "quality_prefix": self.quality_prefix,
+            "subject_scope": self.subject_scope,
+            "scope": self.scope,
             "default_negative": self.default_negative,
             "enabled": self.enabled,
             "ok": self.ok,
@@ -495,6 +523,8 @@ def load_templates(
         manual_style = str(entry.get("tag_style") or "danbooru").strip() or "danbooru"
         preset = str(entry.get("size_preset") or "sdxl").strip() or "sdxl"
         profile = guess_profile(info.get("model_file", ""), info.get("model_class", ""))
+        scope_cfg = str(entry.get("subject_scope") or "auto").strip().lower() or "auto"
+        scope = resolve_scope(scope_cfg, profile.get("family"))
         tag_style = manual_style
         if mode == "auto":
             # 识别到家族才改；识别不到保持手填值（不瞎猜）
@@ -530,6 +560,8 @@ def load_templates(
             prompt_profile=mode,
             profile=profile,
             quality_prefix=quality,
+            subject_scope=scope_cfg,
+            scope=scope,
         )
         out.append(tpl)
     return out

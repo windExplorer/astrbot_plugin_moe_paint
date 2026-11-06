@@ -193,7 +193,8 @@ N = 800
 for _ in range(N):
     c = prompter.draw_brief(rngw, weights=wts)["category"]
     cnt[c] = cnt.get(c, 0) + 1
-girl = cnt.get("美少女", 0) + cnt.get("动漫少女", 0) + cnt.get("真人少女", 0)
+# v0.7.3：写真摄影是真人线里的场景扩充，同属少女题材，计入少女占比
+girl = sum(cnt.get(k, 0) for k in ("美少女", "动漫少女", "真人少女", "写真摄影"))
 anime = cnt.get("美少女", 0) + cnt.get("动漫少女", 0)
 real = cnt.get("真人少女", 0)
 check("weight_girl_dominant", girl / N > 0.6, f"{girl / N:.2f} {cnt}")
@@ -230,6 +231,105 @@ check("style_pool_fallback_global", prompter.style_pool_for("自定义类别") i
 dist = prompter.category_distribution(["a", "b"], {"a": 3, "b": 1})
 check("distribution_pct", dist[0] == {"name": "a", "weight": 3.0, "pct": 75.0}, str(dist))
 check("distribution_empty", prompter.category_distribution([], {}) == [])
+
+# ---------- v0.7.3：写真 / 角色词池（问题 5、6） ----------
+for k in ("写真摄影", "动漫角色", "游戏角色"):
+    check(f"new_category_{k}", k in prompter.CATEGORIES and len(prompter.CATEGORIES[k]) >= 8)
+check("photo_style_group", prompter.CATEGORY_STYLE_GROUP.get("写真摄影") == "photo")
+check("role_style_group", prompter.CATEGORY_STYLE_GROUP.get("动漫角色") == "anime"
+      and prompter.CATEGORY_STYLE_GROUP.get("游戏角色") == "anime")
+check("photo_styles_expanded", len(prompter.STYLES_PHOTO) >= 9)
+check("anime_styles_expanded", len(prompter.STYLES_ANIME) >= 11)
+
+# ---------- v0.7.3：题材能力（问题 2） ----------
+check("scope_builtin_anime", prompter.scope_of("动漫角色") == "anime")
+check("scope_builtin_photo", prompter.scope_of("写真摄影") == "photo")
+check("scope_builtin_both", prompter.scope_of("风景场景") == "both")
+check("scope_custom_default_both", prompter.scope_of("我的猫") == "both")
+check("scope_allows_same", prompter.scope_allows("anime", "动漫角色"))
+check("scope_allows_both", prompter.scope_allows("anime", "风景场景"))
+check("scope_blocks_photo", not prompter.scope_allows("anime", "写真摄影"))
+check("scope_blocks_anime", not prompter.scope_allows("photo", "动漫角色"))
+check("scope_both_wf_all", prompter.scope_allows("both", "写真摄影"))
+
+sp = prompter.parse_scopes("我的猫=anime, 写真摄影=both, 乱写=xxx")
+check("parse_scopes_valid", sp == {"我的猫": "anime", "写真摄影": "both"}, str(sp))
+check("parse_scopes_override", prompter.scope_of("写真摄影", sp) == "both")
+check("parse_scopes_dict", prompter.parse_scopes({"a": "photo"}) == {"a": "photo"})
+
+anime_cats, photo_cats, both_cats = set(), set(), set()
+for s in range(300):
+    anime_cats.add(prompter.draw_brief(random.Random(s), scope="anime")["category"])
+    photo_cats.add(prompter.draw_brief(random.Random(s), scope="photo")["category"])
+    both_cats.add(prompter.draw_brief(random.Random(s), scope="both")["category"])
+check("anime_wf_no_photo_cat", not (anime_cats & {"写真摄影", "真人少女", "人物肖像"}), str(anime_cats))
+check("photo_wf_no_anime_cat", not (photo_cats & {"动漫角色", "游戏角色", "美少女", "动漫少女"}), str(photo_cats))
+check("both_wf_unrestricted", "写真摄影" in both_cats and "动漫角色" in both_cats)
+check("brief_has_scope", prompter.draw_brief(random.Random(1), scope="photo")["scope"] == "photo")
+
+all_anime_cats = {k for k in prompter.CATEGORIES if prompter.scope_of(k) == "anime"}
+non_anime = all_anime_cats | {"风景场景", "宇宙星空", "艺术创意", "自然生态"}
+b = prompter.draw_brief(random.Random(3), disabled_categories=non_anime, scope="anime")
+check("scope_empty_filter_fallback", b["category"] in prompter.CATEGORIES, b["category"])
+b = prompter.draw_brief(random.Random(5), scope="anime", scopes={"写真摄影": "both"},
+                        disabled_categories=non_anime)
+check("scope_override_in_draw", b["category"] == "写真摄影", b["category"])
+
+# ---------- v0.7.3：角色名单（可删改） ----------
+kv = prompter.parse_kv_words(prompter.DEFAULT_CHARACTER_NAMES)
+check("char_names_two_cats", set(kv) == {"动漫角色", "游戏角色"}, str(list(kv)))
+check("char_names_words", all(len(v) >= 10 for v in kv.values()))
+check("char_names_inject", "初音未来" in kv["动漫角色"] and "甘雨" in kv["游戏角色"])
+check("char_names_bad_lines", prompter.parse_kv_words("没等号的一行\nA=x,y\nB=") == {"A": ["x", "y"]})
+check("char_names_cleared", prompter.parse_kv_words("") == {})
+pool = prompter.theme_pool()
+check("theme_pool_categories", len(pool["categories"]) == len(prompter.CATEGORIES))
+check("theme_pool_layers", set(pool["layers"]) == {"风格", "光色", "氛围", "构图"})
+check("theme_pool_scope", next(c for c in pool["categories"] if c["name"] == "写真摄影")["scope"] == "photo")
+check("theme_pool_scopes_override",
+      next(c for c in prompter.theme_pool({"写真摄影": "both"})["categories"]
+           if c["name"] == "写真摄影")["scope"] == "both")
+
+# ---------- v0.7.3：系统提示词定制（问题 1） ----------
+opts = {"persona_enabled": True, "persona_text": "人物一律东亚成年女性", "extra_rules": "不要画雨天"}
+sys_custom = prompter.build_system_prompt("danbooru", opts)
+check("sys_persona_rule", "人物一律东亚成年女性" in sys_custom)
+check("sys_extra_rules", "不要画雨天" in sys_custom)
+check("sys_contract_last", sys_custom.rstrip().endswith("JSON 以外的任何字符都算错误。"))
+check("sys_rules_before_contract", sys_custom.index("不要画雨天") < sys_custom.index("【输出契约】"))
+sys_off = prompter.build_system_prompt("danbooru", {"persona_enabled": False, "persona_text": "X", "extra_rules": "Y"})
+check("sys_persona_off", "X" not in sys_off and "Y" in sys_off)
+check("sys_no_rules_by_default", "【附加规则" not in prompter.build_system_prompt("danbooru"))
+check("sys_opt_bool_strings", prompter.opt_bool("false") is False and prompter.opt_bool("on") is True)
+
+ov = prompter.build_system_prompt("danbooru", {"override_danbooru": "只写你自己的规则"})
+check("sys_override_replaces", "Danbooru" not in ov and "只写你自己的规则" in ov)
+check("sys_override_adds_contract", "JSON" in ov)
+ov2 = prompter.build_system_prompt("natural_en", {"override_natural_en": 'Output JSON only'})
+check("sys_override_keeps_own_contract", ov2.count("JSON") == 1 and "English prompt" not in ov2)
+check("sys_override_style_isolated", "Danbooru" in prompter.build_system_prompt("danbooru", {"override_natural_en": "x"}))
+ov3 = prompter.build_system_prompt("natural_zh", {"override_natural": "only this"})
+check("sys_override_natural_shared", "only this" in ov3 and "你是一位顶级" not in ov3)
+
+# ---------- v0.7.3：人物锚定硬约束（问题 3） ----------
+base = {"prompt": "night, school uniform, smile", "negative": "lowres, bad hands", "caption": "x"}
+p = prompter.apply_persona(base, "danbooru", {"category": "动漫少女"})
+check("persona_tags_prepended", p["prompt"].startswith("1girl, solo, asian")
+      and p["prompt"].endswith("night, school uniform, smile"))
+check("persona_negative_added", "old woman" in p["negative"] and "underage" in p["negative"])
+check("persona_keeps_original_negative", p["negative"].startswith("lowres, bad hands"))
+p2 = prompter.apply_persona(p, "danbooru", {"category": "动漫少女"})
+check("persona_idempotent", p2["prompt"] == p["prompt"] and p2["negative"] == p["negative"])
+p3 = prompter.apply_persona(base, "danbooru", {"category": "风景场景"})
+check("persona_skips_scenery", p3["prompt"] == base["prompt"] and p3["negative"] == base["negative"])
+p4 = prompter.apply_persona(base, "danbooru", {"category": "动漫少女"}, {"persona_enabled": False})
+check("persona_disabled", p4["prompt"] == base["prompt"] and p4["negative"] == base["negative"])
+p5 = prompter.apply_persona(base, "natural", {"category": "真人少女"})
+check("persona_natural_no_tags", p5["prompt"] == base["prompt"])
+check("persona_natural_zh_negative", "未成年" in p5["negative"])
+p6 = prompter.apply_persona(base, "natural_en", {"category": "写真摄影"})
+check("persona_natural_en_negative", "old woman" in p6["negative"])
+check("persona_no_mutate", base["prompt"] == "night, school uniform, smile")
 
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)
