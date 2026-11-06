@@ -51,7 +51,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.4.0",
+    "v0.4.1",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -363,47 +363,58 @@ class MoePaintPlugin(Star):
                 "supported": bool(bid) and parse_ok,
                 "reason": reason,
             })
+        # 多选轮换：picked = 当前参与的名字；usable = 符合条件可参与的总数
+        out["usable"] = len(workflow_mgr.select_workflows(cfgs, ""))
+        out["picked"] = [
+            str(w.get("name") or "")
+            for w in workflow_mgr.select_workflows(cfgs, acfg.get("workflow"))
+        ]
         return out
 
-    def _anima_template(self):
-        """把萌绘选中的工作流组装成本插件的 Template（含它自己的覆盖参数）。
+    @staticmethod
+    def _anima_template_failure(problem: str) -> list:
+        return [workflow_mgr.Template(
+            name="萌绘工作流", file="", source="anima", ok=False, problem=problem,
+        )]
+
+    def _anima_templates(self) -> list:
+        """跟随萌绘：把选中的工作流各组装成一个 Template（可多选，随机/轮换）。
+
+        `anima.workflow` 留空 = 萌绘里所有可用的新版工作流都参与。
+        """
+        inst = self._anima_instance()
+        if inst is None:
+            return self._anima_template_failure("萌绘未安装或未激活，无法使用它的工作流")
+        cfgs = self._anima_workflow_cfgs()
+        if not cfgs:
+            return self._anima_template_failure("萌绘里还没有工作流（去萌绘控制台的工作流页新建）")
+        raw = self._sub("anima").get("workflow")
+        picked = workflow_mgr.select_workflows(cfgs, raw)
+        if not picked:
+            want = "、".join(workflow_mgr.split_names(raw))
+            if want:
+                why = f"萌绘里找不到可用工作流「{want}」（检查名字，或它已被停用/未关联基础工作流）"
+            elif not any(str(w.get("base_id") or "").strip() for w in cfgs):
+                why = "萌绘里的工作流都是旧版（未关联基础工作流），暂不支持"
+            else:
+                why = "萌绘里没有已启用的新版工作流（需要关联基础工作流并启用）"
+            return self._anima_template_failure(why)
+        out: list = []
+        for w in picked:
+            tpl = self._build_anima_template(inst, w)
+            if tpl is not None:
+                out.append(tpl)
+        return out
+
+    def _build_anima_template(self, inst, chosen: dict):
+        """把萌绘的一条工作流组装成 Template（含它自己的覆盖参数）。
 
         优先用萌绘的运行时构造（`_load_from_base` + `_apply_base_overrides`），
         这样「固定种子 / 步数 / 采样器 / 放大 / 清理 / 保存格式」等覆盖与萌绘出图一致；
         这两个是半公开方法，改名时只降级为「只用基础工作流底图」，不会把插件带崩。
         """
-        name_fallback = "萌绘工作流"
-        inst = self._anima_instance()
-        if inst is None:
-            return workflow_mgr.Template(
-                name=name_fallback, file="", source="anima", ok=False,
-                problem="萌绘未安装或未激活，无法使用它的工作流",
-            )
         acfg = self._sub("anima")
-        want = str(acfg.get("workflow") or "").strip()
-        cfgs = self._anima_workflow_cfgs()
-        if not cfgs:
-            return workflow_mgr.Template(
-                name=name_fallback, file="", source="anima", ok=False,
-                problem="萌绘里还没有工作流（去萌绘控制台的工作流页新建）",
-            )
-        chosen = None
-        for w in cfgs:
-            if want and want in (str(w.get("name") or "").strip(), str(w.get("workflow_id") or "").strip()):
-                chosen = w
-                break
-        if chosen is None:
-            for w in cfgs:
-                if bool(w.get("enabled", True)) and str(w.get("base_id") or "").strip():
-                    chosen = w
-                    break
-        if chosen is None:
-            return workflow_mgr.Template(
-                name=name_fallback, file="", source="anima", ok=False,
-                problem=(f"萌绘里找不到可用的工作流「{want}」" if want
-                         else "萌绘里没有可用的新版工作流（需要先关联基础工作流）"),
-            )
-        name = str(chosen.get("name") or name_fallback).strip()
+        name = str(chosen.get("name") or "萌绘工作流").strip()
         bid = str(chosen.get("base_id") or "").strip()
         try:
             wf_ctx, prompt = inst._load_from_base(chosen)
@@ -679,12 +690,22 @@ class MoePaintPlugin(Star):
         """按 workflow_source 装配模板：local = 本插件工作流库；anima = 用萌绘的工作流。"""
         source = str(self._cfg().get("workflow_source") or "local").strip()
         if source == "anima":
-            tpl = self._anima_template()
-            self._templates = [tpl] if tpl is not None else []
-            if tpl is not None and not tpl.ok:
-                logger.warning(f"{PLUGIN_TAG} 萌绘工作流不可用：{tpl.problem}")
-            elif tpl is not None:
-                logger.info(f"{PLUGIN_TAG} 模板来源：萌绘工作流「{tpl.name}」（{tpl.file}）")
+            tpls = self._anima_templates()
+            self._templates = tpls
+            bad = [t for t in tpls if not t.ok]
+            if bad:
+                logger.warning(
+                    f"{PLUGIN_TAG} 萌绘工作流问题：{'; '.join(f'{t.name}: {t.problem}' for t in bad)}"
+                )
+            pool = workflow_mgr.enabled_pool(tpls)
+            if not pool:
+                logger.warning(f"{PLUGIN_TAG} 跟随萌绘模式下没有可用工作流（检查来源与选择）")
+            else:
+                mode = str(self._cfg().get("workflow_selection") or "random")
+                logger.info(
+                    f"{PLUGIN_TAG} 模板来源：萌绘工作流 {len(pool)} 个"
+                    f"（{'、'.join(t.name for t in pool)}），选择方式 {mode}"
+                )
             return
         entries = self._cfg().get("workflow_templates")
         if not isinstance(entries, list):

@@ -354,6 +354,9 @@ export interface AnimaWorkflowPayload {
   workflows: AnimaWorkflowRow[];
   selected: string;
   source: string;
+  /** 参与轮换的名字（空名单时后端返回全部可用） */
+  picked?: string[];
+  usable?: number;
 }
 
 export interface WorkflowAnalyze {

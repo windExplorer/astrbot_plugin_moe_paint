@@ -151,5 +151,42 @@ with tempfile.TemporaryDirectory() as td:
     entries2, replaced2 = workflow_mgr.upsert_entry(entries, {"name": "b", "file": "b.json"})
     check("upsert_appended", (not replaced2) and len(entries2) == 2, str(entries2))
 
+# ---------- 多工作流轮换：名单解析 / 挑选 ----------
+check("split_names_none", workflow_mgr.split_names("") == [])
+check("split_names_none_list", workflow_mgr.split_names(None) == [])
+check("split_names_mixed", workflow_mgr.split_names("a, b，c;d\n e") == ["a", "b", "c", "d", "e"],
+      str(workflow_mgr.split_names("a, b，c;d\n e")))
+check("split_names_dedup", workflow_mgr.split_names("a,a，a") == ["a"])
+check("split_names_list_input", workflow_mgr.split_names(["x", " y ", ""]) == ["x", "y"])
+
+cfgs = [
+    {"name": "写实", "workflow_id": "wf_1", "enabled": True, "base_id": "3"},
+    {"name": "动漫", "workflow_id": "wf_2", "enabled": True, "base_id": "4"},
+    {"name": "停用的", "workflow_id": "wf_3", "enabled": False, "base_id": "5"},
+    {"name": "旧版", "workflow_id": "wf_4", "enabled": True, "base_id": ""},
+]
+picked_all = workflow_mgr.select_workflows(cfgs, "")
+check("select_all_usable", [w["name"] for w in picked_all] == ["写实", "动漫"], str(picked_all))
+picked_one = workflow_mgr.select_workflows(cfgs, "动漫")
+check("select_by_name", [w["name"] for w in picked_one] == ["动漫"], str(picked_one))
+picked_multi = workflow_mgr.select_workflows(cfgs, "写实,动漫")
+check("select_multi", len(picked_multi) == 2, str(picked_multi))
+picked_by_id = workflow_mgr.select_workflows(cfgs, "wf_2")
+check("select_by_id", [w["name"] for w in picked_by_id] == ["动漫"], str(picked_by_id))
+picked_disabled = workflow_mgr.select_workflows(cfgs, "停用的")
+check("select_skips_disabled", picked_disabled == [], str(picked_disabled))
+picked_legacy = workflow_mgr.select_workflows(cfgs, "旧版")
+check("select_skips_no_base", picked_legacy == [], str(picked_legacy))
+check("select_unknown_empty", workflow_mgr.select_workflows(cfgs, "不存在") == [])
+
+# 多模板轮换（跟随萌绘时同样走 random / round_robin）
+multi = [workflow_mgr.Template(name=n, file=f"anima:{i}", ok=True, enabled=True, source="anima")
+         for i, n in enumerate(["写实", "动漫", "国风"])]
+q1, c1 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), 0)
+q2, c2 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), c1)
+q3, c3 = workflow_mgr.pick_template(multi, "round_robin", random.Random(1), c2)
+check("anima_rr_cycles", [q1.name, q2.name, q3.name] == ["写实", "动漫", "国风"] and c3 == 3,
+      f"{q1.name},{q2.name},{q3.name},c={c3}")
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

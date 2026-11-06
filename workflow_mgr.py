@@ -272,6 +272,46 @@ def parse_upload(text: str) -> "tuple[dict | None, list[str]]":
     return data, []
 
 
+def split_names(raw) -> list:
+    """把「a,b，c;d 换行」这类手填/多选值拆成去重名称列表；空 → []。"""
+    if isinstance(raw, (list, tuple, set)):
+        items = [str(x) for x in raw]
+    else:
+        items = re.split(r"[,，;；\n\r]+", str(raw or ""))
+    out: list[str] = []
+    seen: set[str] = set()
+    for it in items:
+        s = it.strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def select_workflows(cfgs: list, names, require_base: bool = True) -> list:
+    """按名称/ID 列表挑工作流；名单为空 = 全部可用。
+
+    可用 = 自身 enabled 且（require_base 时）关联了基础工作流（`base_id`）。
+    用于「跟随萌绘」模式下的多工作流轮换：留空即全部参与。
+    """
+    usable = [
+        w for w in (cfgs or [])
+        if isinstance(w, dict)
+        and bool(w.get("enabled", True))
+        and (not require_base or str(w.get("base_id") or "").strip())
+    ]
+    want = split_names(names)
+    if not want:
+        return usable
+    picked: list[dict] = []
+    for w in usable:
+        name = str(w.get("name") or "").strip()
+        wid = str(w.get("workflow_id") or "").strip()
+        if (name and name in want) or (wid and wid in want):
+            picked.append(w)
+    return picked
+
+
 def save_workflow_file(workflows_dir: Path, name: str, wf: dict) -> str:
     """把工作流写到工作流目录，返回文件名（同名覆盖；文件名做安全清洗）。"""
     workflows_dir = Path(workflows_dir)

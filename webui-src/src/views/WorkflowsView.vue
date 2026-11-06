@@ -23,6 +23,7 @@ import {
 } from "../api";
 import { cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { refreshStatus, status } from "../store";
+import { splitNames } from "../utils";
 
 const message = useMessage();
 
@@ -53,9 +54,10 @@ const source = computed({
   get: () => String(cfgGet("workflow_source", "local")),
   set: (v: string) => cfgSet("workflow_source", v),
 });
-const animaWorkflow = computed({
-  get: () => String(cfgGet("anima.workflow", "")),
-  set: (v: string) => cfgSet("anima.workflow", v),
+/** 参与轮换的萌绘工作流（多选；存成逗号分隔字符串，空 = 全部可用）。 */
+const animaPicked = computed<string[]>({
+  get: () => splitNames(cfgGet("anima.workflow", "")),
+  set: (v: string[]) => cfgSet("anima.workflow", (v || []).join(",")),
 });
 const animaPreset = computed({
   get: () => String(cfgGet("anima.size_preset", "follow")),
@@ -191,10 +193,26 @@ async function switchSource(v: string) {
   await saveSource();
 }
 
-async function useAnima(name: string) {
-  animaWorkflow.value = name;
+const animaUsable = computed(() => animaRows.value.filter((w) => w.supported && w.enabled));
+
+/** 实际参与轮换的名单：显式选择优先，留空 = 全部可用。 */
+const animaEffective = computed<string[]>(() =>
+  animaPicked.value.length ? animaPicked.value : animaUsable.value.map((w) => w.name),
+);
+
+function isPicked(name: string): boolean {
+  return animaEffective.value.includes(name);
+}
+
+function togglePick(name: string) {
+  const cur = animaEffective.value.slice();
+  const next = cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name];
+  animaPicked.value = next;
+}
+
+async function resetPicks() {
+  animaPicked.value = [];
   await saveSource();
-  message.success(`已选择萌绘工作流「${name}」`);
 }
 
 async function save() {
@@ -343,52 +361,61 @@ onMounted(reloadAll);
         </button>
       </div>
 
-      <div v-if="source === 'local'" class="mp-fields block">
+      <div class="mp-fields block">
         <label class="mp-field">
           <span class="label">模板轮换</span>
           <n-select v-model:value="selectionMode" :options="modeOptions" size="small" />
-          <span class="mp-sub">只有「启用 + 校验通过」的模板参与</span>
+          <span class="mp-sub">真正出图时从参与名单里挑：随机 / 顺序轮换</span>
         </label>
-        <label class="mp-field mp-field--wide">
+        <label v-if="source === 'local'" class="mp-field mp-field--wide">
           <span class="label">工作流目录</span>
           <div class="dir mp-mono">{{ workflowsDir || "（加载中）" }}</div>
           <span class="mp-sub">上传会自动写到这里；也可以手动丢 JSON 进来再登记</span>
         </label>
       </div>
 
-      <div v-else class="block">
+      <div v-if="source === 'anima'" class="block">
         <div class="mp-fields">
-          <label class="mp-field">
-            <span class="label">用萌绘的哪个工作流</span>
+          <label class="mp-field mp-field--wide">
+            <span class="label">参与轮换的萌绘工作流（可多选）</span>
             <n-select
-              v-model:value="animaWorkflow"
+              v-model:value="animaPicked"
               :options="animaOptions"
               size="small"
+              multiple
               clearable
               filterable
-              placeholder="留空 = 萌绘里第一个可用的新版工作流"
+              placeholder="留空 = 萌绘里所有可用的新版工作流都参与"
             />
-            <span class="mp-sub">下拉里标「不可用」的是旧版或基础工作流解析没通过，选了也不会生效</span>
+            <span class="mp-sub">
+              已选 {{ animaPicked.length || "（全部）" }} 条；实际参与
+              {{ animaEffective.length }} 条（可用 {{ animaUsable.length }} 条）。
+              不勾选任何一条 = 全部可用都参与轮换；改完记得点右上角「保存」。
+            </span>
           </label>
           <label class="mp-field">
             <span class="label">尺寸策略</span>
             <n-select v-model:value="animaPreset" :options="presetOptions" size="small" />
-            <span class="mp-sub">follow = 直接用基础工作流 latent 的宽高（横竖自动互换）</span>
+            <span class="mp-sub">follow = 直接用各自基础工作流 latent 的宽高</span>
           </label>
         </div>
         <div class="mp-row" style="margin-top: 10px">
           <n-button size="small" quaternary :loading="loading" @click="refreshAnima">刷新萌绘工作流列表</n-button>
+          <n-button size="small" quaternary :disabled="!animaPicked.length" @click="resetPicks">
+            恢复「全部参与」
+          </n-button>
           <span v-if="animaInfo?.error" class="mp-err">{{ animaInfo.error }}</span>
         </div>
 
         <div v-if="animaRows.length" class="anima-list">
-          <div v-for="w in animaRows" :key="w.key || w.name" class="anima-row" :class="{ bad: !w.supported }">
+          <div v-for="w in animaRows" :key="w.key || w.name" class="anima-row" :class="{ bad: !w.supported, off: !isPicked(w.name) }">
             <div class="anima-main">
               <div class="anima-name">
                 {{ w.name }}
                 <n-tag v-if="!w.enabled" size="tiny" :bordered="false">萌绘里已停用</n-tag>
                 <n-tag v-if="w.supported" size="tiny" :bordered="false" type="success">可用</n-tag>
                 <n-tag v-else size="tiny" :bordered="false" type="error">不可用</n-tag>
+                <n-tag v-if="w.supported && isPicked(w.name)" size="tiny" :bordered="false" type="info">参与中</n-tag>
               </div>
               <div class="mp-sub">
                 基础工作流：{{ w.base_name || "—" }}
@@ -396,7 +423,15 @@ onMounted(reloadAll);
               </div>
               <div v-if="!w.supported && w.reason" class="mp-err">{{ w.reason }}</div>
             </div>
-            <n-button size="small" :disabled="!w.supported" @click="useAnima(w.name)">用这条</n-button>
+            <n-button
+              size="small"
+              :disabled="!w.supported"
+              :type="isPicked(w.name) ? 'default' : 'primary'"
+              quaternary
+              @click="togglePick(w.name)"
+            >
+              {{ isPicked(w.name) ? "移出轮换" : "加入轮换" }}
+            </n-button>
           </div>
         </div>
         <n-empty v-else description="没读到萌绘的工作流（萌绘未安装 / 未激活 / 还没建工作流）" size="small" />
@@ -712,6 +747,10 @@ onMounted(reloadAll);
 
 .anima-row.bad {
   border-color: rgba(217, 96, 95, 0.35);
+}
+
+.anima-row.off {
+  opacity: 0.6;
 }
 
 .anima-name {

@@ -130,6 +130,23 @@ export function scheduleSummary(s: {
   return base;
 }
 
+/** "a,b，c;d" → ["a","b","c","d"]（去重、去空白）；array 原样清洗。 */
+export function splitNames(raw: any): string[] {
+  const items = Array.isArray(raw)
+    ? raw.map((x) => String(x))
+    : String(raw ?? "").split(/[,，;；\n\r]+/);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const it of items) {
+    const s = it.trim();
+    if (s && !seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
 export function copyText(text: string, label: string, done?: (msg: string) => void): void {
   if (!text) return;
   const ok = (m: string) => done?.(m);
