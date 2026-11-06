@@ -321,7 +321,9 @@ check("persona_keeps_original_negative", p["negative"].startswith("lowres, bad h
 p2 = prompter.apply_persona(p, "danbooru", {"category": "动漫少女"})
 check("persona_idempotent", p2["prompt"] == p["prompt"] and p2["negative"] == p["negative"])
 p3 = prompter.apply_persona(base, "danbooru", {"category": "风景场景"})
-check("persona_skips_scenery", p3["prompt"] == base["prompt"] and p3["negative"] == base["negative"])
+# v0.7.6：景物类仍不塞 1girl（会毁风景），但排除负面词现在对全类别生效
+check("persona_skips_scenery_prompt", p3["prompt"] == base["prompt"])
+check("persona_scenery_negative", "old woman" in p3["negative"] and "1boy" in p3["negative"])
 p4 = prompter.apply_persona(base, "danbooru", {"category": "动漫少女"}, {"persona_enabled": False})
 check("persona_disabled", p4["prompt"] == base["prompt"] and p4["negative"] == base["negative"])
 p5 = prompter.apply_persona(base, "natural", {"category": "真人少女"})
@@ -330,6 +332,90 @@ check("persona_natural_zh_negative", "未成年" in p5["negative"])
 p6 = prompter.apply_persona(base, "natural_en", {"category": "写真摄影"})
 check("persona_natural_en_negative", "old woman" in p6["negative"])
 check("persona_no_mutate", base["prompt"] == "night, school uniform, smile")
+
+# ---------- v0.7.6：画风硬锚定（可画类型真正写进提示词） ----------
+check("normalize_scope",
+      [prompter.normalize_scope(x) for x in ("ANIME", "photo", "both", "bad", None)]
+      == ["anime", "photo", "both", "both", "both"])
+
+bt = prompter.brief_text({
+    "category": "风景场景", "subject": "银河", "style": "新海诚式光影",
+    "composition": "超广角", "light": "星云紫蓝", "mood": "宁静", "scope": "anime",
+})
+check("brief_has_scope_label", "可画类型=只画动漫（二次元插画）" in bt, bt)
+check("brief_scope_both", "可画类型=两者皆可" in prompter.brief_text({"scope": "bad"}))
+bt2 = prompter.brief_text({"scope": "photo"}, "赛博朋克")
+check("brief_theme_keeps_scope", "题材=赛博朋克" in bt2 and "可画类型=只画真人" in bt2, bt2)
+
+# 系统提示词：三种风格都加画风硬规则；both 不加；开关可关；完全覆盖也照样追加
+for st in ("danbooru", "natural", "natural_en"):
+    s = prompter.build_system_prompt(st, {}, "anime")
+    check(f"sys_anchor_anime_{st}", ("画风硬约束" in s or "STYLE LOCK" in s) and "JSON" in s)
+    s2 = prompter.build_system_prompt(st, {}, "photo")
+    check(f"sys_anchor_photo_{st}", "写实摄影" in s2 or "photorealistic photograph" in s2)
+check("sys_anchor_en_only_anime",
+      "2D anime illustration" in prompter.build_system_prompt("natural_en", {}, "anime"))
+check("sys_anchor_both_none",
+      "画风硬约束" not in prompter.build_system_prompt("danbooru", {}, "both"))
+check("sys_anchor_off", "画风硬约束" not in prompter.build_system_prompt(
+    "danbooru", {"style_anchor_enabled": False}, "anime"))
+ov_anchor = prompter.build_system_prompt("danbooru", {"override_danbooru": "only mine"}, "anime")
+check("sys_anchor_override", "画风硬约束" in ov_anchor and "Danbooru" not in ov_anchor)
+check("sys_anchor_override_off", "画风硬约束" not in prompter.build_system_prompt(
+    "danbooru", {"override_danbooru": "only mine", "style_anchor_enabled": False}, "anime"))
+
+# 风格池：可画类型优先，风景 / 星空等 both 题材也跟着画风走
+check("style_pool_scope_anime", prompter.style_pool_for("风景场景", "anime") is prompter.STYLES_ANIME)
+check("style_pool_scope_photo", prompter.style_pool_for("宇宙星空", "photo") is prompter.STYLES_PHOTO)
+check("style_pool_scope_both_global", prompter.style_pool_for("风景场景", "both") is prompter.STYLES)
+check("style_pool_bad_scope", prompter.style_pool_for("风景场景", "xxx") is prompter.STYLES)
+photo_only = set(prompter.STYLES_PHOTO) - set(prompter.STYLES_ANIME)
+anime_styles = {prompter.draw_brief(random.Random(s), scope="anime")["style"] for s in range(200)}
+check("draw_brief_anime_no_photo_style", not (anime_styles & photo_only), str(anime_styles & photo_only))
+photo_styles = {prompter.draw_brief(random.Random(s), scope="photo")["style"] for s in range(200)}
+anime_only = set(prompter.STYLES_ANIME) - set(prompter.STYLES_PHOTO)
+check("draw_brief_photo_no_anime_style", not (photo_styles & anime_only), str(photo_styles & anime_only))
+check("draw_brief_scope_field", prompter.draw_brief(random.Random(1), scope="anime")["scope"] == "anime")
+
+# 输出硬拼接（danbooru）：前置动漫标签 + 排除写实词，景物类仍不塞人物
+b = {"prompt": "scenery, night, milky way", "negative": "lowres", "caption": "x"}
+a = prompter.apply_persona(b, "danbooru", {"category": "风景场景"}, {}, "anime")
+check("anchor_danbooru_tags", "anime style" in a["prompt"] and "2d" in a["prompt"])
+check("anchor_danbooru_neg", "photorealistic" in a["negative"] and "3d render" in a["negative"])
+check("anchor_scenery_no_1girl", "1girl" not in a["prompt"])
+ap = prompter.apply_persona(b, "danbooru", {"category": "风景场景"}, {}, "photo")
+check("anchor_danbooru_photo", "photorealistic" in ap["prompt"])
+check("anchor_photo_neg_anime", "anime," in ap["negative"])
+a2 = prompter.apply_persona(a, "danbooru", {"category": "风景场景"}, {}, "anime")
+check("anchor_idempotent", a2["prompt"] == a["prompt"] and a2["negative"] == a["negative"])
+
+# 自然语言风格：句首点明画风，不插标签串
+n = {"prompt": "夜空下有一条银河落在湖面。", "negative": "模糊", "caption": "x"}
+na = prompter.apply_persona(n, "natural", {"category": "风景场景"}, {}, "anime")
+check("anchor_natural_prefix", na["prompt"].startswith("一幅精美的二次元动漫插画，"))
+check("anchor_natural_neg", "写实照片" in na["negative"])
+ne = prompter.apply_persona(
+    {"prompt": "A lake under the milky way.", "negative": "blurry", "caption": "x"},
+    "natural_en", {"category": "风景场景"}, {}, "anime")
+check("anchor_en_prefix", ne["prompt"].startswith("An exquisite anime-style illustration"))
+check("anchor_en_neg", "photorealistic" in ne["negative"])
+ne2 = prompter.apply_persona(
+    {"prompt": "An anime illustration of a lake.", "negative": "", "caption": "x"},
+    "natural_en", {"category": "风景场景"}, {}, "anime")
+check("anchor_en_no_duplicate_prefix", ne2["prompt"].startswith("An anime illustration"))
+np_ = prompter.apply_persona(n, "natural", {"category": "风景场景"}, {}, "photo")
+check("anchor_natural_photo_prefix", np_["prompt"].startswith("一张高质量的写实摄影作品，"))
+
+# 开关 / 两套锚定互不干扰
+check("anchor_both_noop", prompter.apply_persona(
+    b, "danbooru", {"category": "风景场景"}, {}, "both")["prompt"] == b["prompt"])
+check("anchor_off_noop", prompter.apply_persona(
+    b, "danbooru", {"category": "风景场景"}, {"style_anchor_enabled": False}, "anime")["prompt"] == b["prompt"])
+check("anchor_off_keeps_persona", "old woman" in prompter.apply_persona(
+    b, "danbooru", {"category": "风景场景"}, {"style_anchor_enabled": False}, "anime")["negative"])
+check("anchor_persona_off_still_anchors", "anime style" in prompter.apply_persona(
+    b, "danbooru", {"category": "风景场景"}, {"persona_enabled": False}, "anime")["prompt"])
+check("anchor_no_mutate", b["prompt"] == "scenery, night, milky way")
 
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

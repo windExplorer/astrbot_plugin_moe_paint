@@ -90,6 +90,7 @@ def main() -> int:
         ("prompt", "persona_enabled"),
         ("prompt", "persona_text"),
         ("prompt", "extra_rules"),
+        ("prompt", "style_anchor_enabled"),
         ("prompt", "override_danbooru"),
         ("schedule", "mode"),
         ("schedule", "interval_minutes"),

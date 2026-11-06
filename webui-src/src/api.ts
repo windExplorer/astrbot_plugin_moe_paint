@@ -288,6 +288,8 @@ export interface LlmPreview {
   brief: Record<string, string> | null;
   template: string;
   tag_style: string;
+  /** 本轮工作流生效的可画类型：anime / photo / both */
+  scope: string;
   size: { width: number; height: number } | null;
   prompt: string;
   negative: string;

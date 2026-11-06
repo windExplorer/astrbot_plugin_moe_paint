@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.5",
+    "v0.7.6",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -650,7 +650,10 @@ class MoePaintPlugin(Star):
         pid = str(self._sub("llm").get("provider_id") or "").strip()
         label = pid or "全局默认"
         opts = self._prompt_opts()
-        sys_prompt = prompter.build_system_prompt(tpl.tag_style, opts)
+        # 工作流可画类型必须一路传到提示词：系统提示词的画风硬规则 + 出图后的
+        # 硬拼接标签，两处都要用同一个值，否则又会「设了只画动漫却画出真人」。
+        scope = str(getattr(tpl, "scope", "both") or "both")
+        sys_prompt = prompter.build_system_prompt(tpl.tag_style, opts, scope)
         user_prompt = prompter.build_user_prompt(brief)
         t0 = time.monotonic()
         try:
@@ -668,7 +671,7 @@ class MoePaintPlugin(Star):
         payload["_raw"] = text[:4000]
         # 人物锚定是硬约束（补人物标签 + 排除负面词），先于质量词落地；
         # 质量词由 apply_quality_prefix 放到最前，故两者不会互相覆盖。
-        payload = prompter.apply_persona(payload, tpl.tag_style, brief, opts)
+        payload = prompter.apply_persona(payload, tpl.tag_style, brief, opts, scope)
         # danbooru 系补质量词（系统提示里承诺「由系统添加」，这里真正落地）
         payload["prompt"] = prompter.apply_quality_prefix(
             payload.get("prompt", ""), getattr(tpl, "quality_prefix", "")
@@ -683,7 +686,7 @@ class MoePaintPlugin(Star):
         """
         t0 = time.monotonic()
         out: dict = {"ok": False, "error": "", "brief": None, "template": "", "tag_style": "",
-                     "size": None, "prompt": "", "negative": "", "caption": "",
+                     "scope": "", "size": None, "prompt": "", "negative": "", "caption": "",
                      "raw": "", "llm_provider": "", "llm_ms": 0, "total_ms": 0}
         try:
             self.reload_templates()
@@ -706,6 +709,7 @@ class MoePaintPlugin(Star):
             out["brief"] = brief
             tag_style = tpl.tag_style if tpl else "danbooru"
             out["tag_style"] = tag_style
+            out["scope"] = str(getattr(tpl, "scope", "both") or "both")
             out["template"] = tpl.name if tpl else "（无可用模板，仅测提示词）"
             sizes = tpl.sizes if tpl else prompter.SIZE_PRESETS["sdxl"]
             payload, label, ms = await self._llm_prompt(brief, tpl or workflow_mgr.Template(name="", file=""))
@@ -1186,6 +1190,7 @@ class MoePaintPlugin(Star):
             "persona_negative": prompter.DEFAULT_PERSONA_NEGATIVE,
             "persona_negative_zh": prompter.DEFAULT_PERSONA_NEGATIVE_ZH,
             "extra_rules": "",
+            "style_anchor_enabled": True,
         }
 
     def _theme_extra(self) -> dict:

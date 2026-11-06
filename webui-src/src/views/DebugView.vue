@@ -37,6 +37,9 @@ const comfyRes = ref<ComfyProbe | null>(null);
 const theme = ref("");
 const llmLoading = ref(false);
 const llmRes = ref<LlmPreview | null>(null);
+const SCOPE_LABEL: Record<string, string> = {
+  anime: "只画动漫", photo: "只画真人", both: "两者皆可",
+};
 
 const umo = ref("");
 const testText = ref("");
@@ -275,8 +278,9 @@ onMounted(async () => {
       </div>
 
       <div class="mp-hint" style="margin-bottom: 10px">
-        走的是真实链路：分层抽签 → LLM 按 JSON 契约写提示词 → 解析 → 按模板白名单落宽高。
-        图库里的失败记录只能看到结果，这里能看到简报、原始返回与耗时。
+        走的是真实链路：分层抽签 → LLM 按 JSON 契约写提示词 → 解析 → 人物/画风硬锚定 → 按模板白名单落宽高。
+        下面「正向 / 负向提示词」是**最终注入 ComfyUI 的文本**（含硬拼接的画风标签与排除词），
+        「LLM 原始返回」才是模型自己写的。图库里只能看到结果，这里能看到全过程与耗时。
       </div>
 
       <n-empty v-if="!llmRes && !llmLoading" description="点「试跑一次」看看模型写得怎么样" />
@@ -294,6 +298,13 @@ onMounted(async () => {
               尺寸 {{ llmRes.size ? `${llmRes.size.width}×${llmRes.size.height}` : "-" }}
             </n-tag>
             <n-tag size="small" :bordered="false">风格 {{ llmRes.tag_style || "-" }}</n-tag>
+            <n-tag
+              size="small"
+              :bordered="false"
+              :type="llmRes.scope === 'anime' ? 'info' : llmRes.scope === 'photo' ? 'warning' : 'default'"
+            >
+              可画类型 {{ SCOPE_LABEL[llmRes.scope] || "-" }}
+            </n-tag>
             <n-tag size="small" :bordered="false">LLM {{ fmtDur(llmRes.llm_ms) }}</n-tag>
             <n-tag size="small" :bordered="false">总 {{ fmtDur(llmRes.total_ms) }}</n-tag>
             <span class="mp-sub">{{ llmRes.llm_provider }}</span>

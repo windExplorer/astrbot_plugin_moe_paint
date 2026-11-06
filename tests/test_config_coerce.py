@@ -47,6 +47,7 @@ FRONTEND_KEYS = [
     "llm.provider_id", "llm.timeout",
     "prompt.persona_enabled", "prompt.persona_text", "prompt.persona_tags",
     "prompt.persona_negative", "prompt.persona_negative_zh", "prompt.extra_rules",
+    "prompt.style_anchor_enabled",
     "prompt.override_danbooru", "prompt.override_natural", "prompt.override_natural_en",
     "schedule.mode", "schedule.interval_minutes", "schedule.jitter_minutes",
     "schedule.daily_times", "schedule.quiet_enabled", "schedule.quiet_hours",

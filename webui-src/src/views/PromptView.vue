@@ -17,10 +17,17 @@ const PROMPT_KEYS = [
   "prompt.persona_negative",
   "prompt.persona_negative_zh",
   "prompt.extra_rules",
+  "prompt.style_anchor_enabled",
   "prompt.override_danbooru",
   "prompt.override_natural",
   "prompt.override_natural_en",
 ];
+
+/** 画风硬锚定总开关（关掉则退回「可画类型只筛题材」的旧行为）。 */
+const styleAnchor = computed({
+  get: () => cfgBool("prompt.style_anchor_enabled", true),
+  set: (v: boolean) => cfgSet("prompt.style_anchor_enabled", v),
+});
 
 const styles = ref<PromptPreviewStyle[]>([]);
 const personaOn = ref(false);
@@ -154,6 +161,35 @@ onMounted(async () => {
       </div>
     </div>
 
+    <!-- 画风硬锚定 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">画风硬锚定（可画类型 → 提示词）</div>
+        <n-button size="small" type="primary" :loading="!!saving['提示词']" @click="save">保存本页</n-button>
+      </div>
+      <div class="switch-row">
+        <n-switch v-model:value="styleAnchor" size="small" />
+        <span>启用画风硬锚定</span>
+        <span class="mp-sub">默认开启；关掉就退回 v0.7.5 行为（可画类型只筛题材、不改提示词）</span>
+      </div>
+      <div class="mp-hint" style="margin-top: 10px">
+        开启后，工作流的「可画类型」会一路传到提示词，<b>不靠 LLM 自觉</b>：
+        <br />① 创作简报带上「可画类型=…」；② 系统提示词追加画风硬规则（完全覆盖时也保留）；
+        ③ LLM 返回后<b>直接改字符串</b>：动漫标签系前置
+        <code class="mp-mono">anime style, 2d, illustration</code>，自然语言风格在句首点明
+        「二次元动漫插画」，负向词一律追加
+        <code class="mp-mono">photorealistic, photo, 3d render…</code>；只画真人则完全对称。
+        <br />风景 / 星空 / 艺术 / 生态这类题材<b>不是中性画风</b>：只画动漫时它们也画成动漫插画，
+        只画真人时画成写实摄影，风格池同步收窄，不会再让动漫工作流抽到「胶片摄影颗粒感」。
+        <br />人物排除负面词（老人 / 男性 / 儿童等）对<b>所有类别</b>生效；景物类仍不会硬塞
+        <code class="mp-mono">1girl</code>，避免毁掉风景。
+      </div>
+      <div class="mp-hint" style="margin-top: 8px">
+        验证方法：去「调试与日志 → LLM 试跑一次」，看「可画类型」标签与最终正向 / 负向提示词里
+        是否已经带上画风标签；展开「LLM 原始返回」可对照模型自己写了什么。
+      </div>
+    </div>
+
     <!-- 追加规则 -->
     <div class="mp-card">
       <div class="mp-card-head">
@@ -227,7 +263,9 @@ onMounted(async () => {
         </div>
       </div>
       <div class="mp-hint" style="margin-bottom: 10px">
-        这里显示的是<b>已保存</b>的配置；在本页改动后先点「保存本页」再刷新。
+        这里显示的是<b>已保存</b>的配置，且按「两者皆可」展示基础提示词——
+        画风硬规则会在出图时按当次工作流的可画类型追加，所以这里看不到。
+        在本页改动后先点「保存本页」再刷新。
         想看最终写出的正负向提示词，去「调试与日志」页跑一次 LLM 试跑。
       </div>
       <div v-if="previewError" class="mp-err">{{ previewError }}</div>

@@ -503,6 +503,14 @@ function effHint(r: TmplRow): string {
   bits.push(`尺寸 ${r.eff_preset || r.size_preset}`);
   bits.push(`可画类型 ${SCOPE_LABEL[r.eff_scope || r.subject_scope] || "自动判断"}`);
   if (r.quality_prefix) bits.push("自动加质量词");
+  // 可画类型不会换底模：标了只画动漫却用写实底模，硬锚定也变不出二次元
+  const sc = r.eff_scope || "both";
+  const st = r.eff_style || r.tag_style;
+  if (sc === "anime" && st !== "danbooru") {
+    bits.push("⚠ 当前底模用自然语言提示词，要画二次元建议换动漫底模");
+  } else if (sc === "photo" && st === "danbooru") {
+    bits.push("⚠ 当前是动漫标签系底模，要画写实建议换写实底模");
+  }
   return bits.join(" · ");
 }
 

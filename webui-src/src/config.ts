@@ -34,6 +34,7 @@ export const KNOWN_KEYS = new Set<string>([
   "prompt.persona_negative",
   "prompt.persona_negative_zh",
   "prompt.extra_rules",
+  "prompt.style_anchor_enabled",
   "prompt.override_danbooru",
   "prompt.override_natural",
   "prompt.override_natural_en",

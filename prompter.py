@@ -140,6 +140,80 @@ PERSON_CATEGORIES: set[str] = {
 
 SCOPES_VALID = ("anime", "photo", "both")
 
+SCOPE_LABEL_ZH: dict[str, str] = {
+    "anime": "只画动漫（二次元插画）",
+    "photo": "只画真人（写实摄影）",
+    "both": "两者皆可",
+}
+
+# --------------------------------------------------------------------------- #
+# 画风硬锚定（v0.7.6）
+# 可画类型此前只是「题材闸门」，完全不进提示词：设了只画动漫，LLM 收到的简报和
+# 系统提示词仍和没设一样，natural_en 那套甚至主动往写实写。这里把它升级成
+# 「输入写进规则 + 输出硬拼字符串」的双保险，不依赖 LLM 自觉。
+# 风景 / 星空 / 艺术 / 生态不是中性题材：它们同样要跟着工作流的画风走。
+# --------------------------------------------------------------------------- #
+
+ANCHOR_TAGS_ANIME = "anime style, anime, 2d, illustration, cel shading, drawn"
+ANCHOR_TAGS_PHOTO = "photorealistic, photograph, realistic, photo, live action"
+ANCHOR_NEG_ANIME = (
+    "photorealistic, realistic, photo, photograph, 3d render, live action, real life, cgi"
+)
+ANCHOR_NEG_PHOTO = "anime, cartoon, illustration, 2d, drawing, painting, cel shading, sketch"
+ANCHOR_PREFIX_NATURAL_ANIME = "一幅精美的二次元动漫插画，"
+ANCHOR_PREFIX_NATURAL_PHOTO = "一张高质量的写实摄影作品，"
+ANCHOR_PREFIX_EN_ANIME = "An exquisite anime-style illustration, "
+ANCHOR_PREFIX_EN_PHOTO = "A high-quality photorealistic photograph, "
+ANCHOR_NEG_ZH_ANIME = "写实照片，真实人像，3D 渲染，实拍，真人"
+ANCHOR_NEG_ZH_PHOTO = "动漫，卡通，插画，二次元，手绘"
+
+_SCOPE_RULES: dict[str, dict[str, str]] = {
+    "anime": {
+        "danbooru": (
+            "【画风硬约束·最高优先级】本轮必须画成二次元动漫插画：prompt 里必须有 "
+            "anime / 2d / illustration 类标签，禁止写实照片、真实人像、3D 渲染、实拍。"
+            "风景、星空、静物等无人物题材也必须是动画/插画风格，不能是摄影照片。"
+        ),
+        "natural": (
+            "【画风硬约束·最高优先级】本轮必须画成二次元动漫插画：描述开头就要点明"
+            "「二次元动漫插画」，禁止写实照片、真实人像、实拍、3D 渲染。"
+            "风景、星空、静物等无人物题材也必须是动画/插画风格。"
+        ),
+        "natural_en": (
+            "[STYLE LOCK - HIGHEST PRIORITY] This image MUST be a 2D anime illustration, "
+            "not a photograph. Begin the prompt with \"An anime-style illustration\". "
+            "Never describe photorealistic / real-life / live-action / 3D-render content. "
+            "Landscapes, starry skies and still life must also be drawn in animation / "
+            "illustration style, never photographic."
+        ),
+    },
+    "photo": {
+        "danbooru": (
+            "【画风硬约束·最高优先级】本轮必须画成写实摄影：prompt 里必须有 "
+            "photorealistic / photograph / realistic 类标签，禁止二次元、动漫、插画、手绘。"
+            "风景、星空、静物等无人物题材也必须是真实摄影质感。"
+        ),
+        "natural": (
+            "【画风硬约束·最高优先级】本轮必须画成写实摄影：描述开头就要点明"
+            "「写实摄影作品」，禁止二次元动漫、插画、手绘、卡通。"
+            "风景、星空、静物等无人物题材也必须是真实摄影质感。"
+        ),
+        "natural_en": (
+            "[STYLE LOCK - HIGHEST PRIORITY] This image MUST be a photorealistic photograph, "
+            "not an anime illustration. Begin the prompt with \"A photorealistic photograph\". "
+            "Never describe anime / cartoon / 2D illustration / painting content. "
+            "Landscapes, starry skies and still life must also look like real photographs."
+        ),
+    },
+}
+
+
+def normalize_scope(scope) -> str:
+    """把任意输入收敛成 anime / photo / both；未知值一律当不限制。"""
+    v = str(scope or "both").strip().lower()
+    return v if v in ("anime", "photo") else "both"
+
+
 DEFAULT_PERSONA_TEXT = (
     "【人物设定·最高优先级】若画面中出现人物，人物一律为东亚面孔的年轻成年女性"
     "（18 岁以上），单人，无男性、无儿童、无中老年，不要其他人种或族裔。"
@@ -162,8 +236,17 @@ DEFAULT_CHARACTER_NAMES = (
 )
 
 
-def style_pool_for(category: str) -> list:
-    """类别 → 风格池（anime / photo / 全局）。"""
+def style_pool_for(category: str, scope: str = "both") -> list:
+    """类别 × 工作流可画类型 → 风格池。
+
+    v0.7.6：可画类型优先。风景/星空等「两者皆可」的题材不是中性画风，
+    只画动漫时它们也得用动漫风格池（此前会抽到「胶片摄影颗粒感」而画成照片）。
+    """
+    sc = normalize_scope(scope)
+    if sc == "anime":
+        return STYLES_ANIME
+    if sc == "photo":
+        return STYLES_PHOTO
     group = CATEGORY_STYLE_GROUP.get(str(category or ""))
     if group == "anime":
         return STYLES_ANIME
@@ -438,7 +521,7 @@ def draw_brief(
 
     category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
     subject = rng.choice(cat_pool[category])
-    style = rng.choice(_merge_words(style_pool_for(category), extra.get("风格")))
+    style = rng.choice(_merge_words(style_pool_for(category, wf_scope), extra.get("风格")))
     light = rng.choice(_merge_words(LIGHTS, extra.get("光色")))
     mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
 
@@ -463,10 +546,16 @@ def draw_brief(
 
 
 def brief_text(brief: dict, theme: str = "") -> str:
-    """把简报排成给 LLM 的一行简报文本。theme 非空时覆盖题材（指令「画一张 主题词」）。"""
+    """把简报排成给 LLM 的一行简报文本。theme 非空时覆盖题材（指令「画一张 主题词」）。
+
+    v0.7.6：带上「可画类型」。此前 brief 里有 scope 却被丢弃，LLM 根本不知道
+    这一轮要画二次元还是写实。
+    """
     subject = theme.strip() or brief.get("subject", "")
+    scope = SCOPE_LABEL_ZH[normalize_scope(brief.get("scope"))]
     return (
         f"类别={brief.get('category', '')}；题材={subject}；风格={brief.get('style', '')}；"
+        f"可画类型={scope}；"
         f"构图={brief.get('composition', '')}；光色={brief.get('light', '')}；"
         f"氛围={brief.get('mood', '')}"
     )
@@ -547,23 +636,33 @@ def opt_bool(v, default: bool = True) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
 
 
-def build_system_prompt(tag_style: str, opts: dict | None = None) -> str:
-    """按提示词风格给系统提示词。
+def build_system_prompt(tag_style: str, opts: dict | None = None, scope: str = "both") -> str:
+    """按提示词风格 + 工作流可画类型给系统提示词。
 
     opts（配置 prompt 分组）：
     - ``override_<style>`` 非空 → 完全替换该风格的系统提示词；
       若替换文本没写 JSON 输出契约，自动补上，避免整轮判失败。
     - ``persona_enabled`` / ``persona_text`` → 人物锚定规则段；
     - ``extra_rules`` → 用户自定义规则段；
-    两者都拼在「主体之后、输出契约之前」，优先级高于主体里的泛泛要求。
+    - ``style_anchor_enabled`` → 是否插入画风硬规则（默认开）。
+    ``scope`` 为 anime / photo 时追加画风硬规则段；它是插件级硬约束，
+    即使完全覆盖系统提示词也照样追加，避免用户改完提示词又画成真人。
     """
     opts = opts or {}
     key = _style_key(str(tag_style or ""))
+    sc = normalize_scope(scope)
+    rule = ""
+    if sc != "both" and opt_bool(opts.get("style_anchor_enabled"), True):
+        rule = _SCOPE_RULES[sc][key]
+
     override = str(opts.get(f"override_{key}") or "").strip()
     if override:
         if "json" not in override.lower():
             override = override.rstrip() + "\n" + _SYSTEM_COMMON_TAIL.strip()
+        if rule:
+            override = override.rstrip() + "\n" + rule + "\n"
         return override
+
     body = _SYSTEM_BODIES[key]
     rules: list[str] = []
     if opt_bool(opts.get("persona_enabled"), True):
@@ -573,6 +672,8 @@ def build_system_prompt(tag_style: str, opts: dict | None = None) -> str:
     extra = str(opts.get("extra_rules") or "").strip()
     if extra:
         rules.append(extra)
+    if rule:
+        rules.append(rule)
     if rules:
         body += "\n【附加规则（优先于以上通用要求）】\n" + "\n".join(rules) + "\n"
     return body + _SYSTEM_COMMON_TAIL
@@ -591,30 +692,78 @@ def _merge_tags(text: str, tags: str, front: bool) -> str:
     return (", ".join(missing) + ", " + cur) if front else (cur + ", " + ", ".join(missing))
 
 
-def apply_persona(payload: dict, tag_style: str, brief: dict, opts: dict | None = None) -> dict:
-    """人物锚定的「硬约束」落地：补人物标签 + 追加排除负面词。
+def apply_persona(
+    payload: dict, tag_style: str, brief: dict, opts: dict | None = None,
+    scope: str = "both",
+) -> dict:
+    """硬约束落地：人物锚定 + 画风锚定，全部直接改字符串，不依赖 LLM 自觉。
 
-    只对 PERSON_CATEGORIES 生效 —— 风景/星空/生态是纯景物，硬塞 1girl 会毁画面；
-    人物肖像类里有老人与男性，也不该套少女标签。
-    自然语言风格不往 prompt 里插标签（会破坏句子），靠系统提示词里的规则约束。
+    人物锚定（``persona_enabled``）：
+    - 正面人物标签只给 PERSON_CATEGORIES（景物类硬塞 1girl 会毁画面）；
+    - 排除负面词 **所有类别都加**。v0.7.6 之前非人物类整段 return，导致景物图里
+      冒出老人 / 男人 / 儿童，而系统提示词里的中文规则对 natural_en 又太弱。
+
+    画风锚定（``style_anchor_enabled``，独立开关）：
+    - scope=anime / photo 时把画风标签或句首画风前缀硬拼进 prompt、把反向词加进
+      negative；风景 / 星空 / 艺术 / 生态这类 both 题材也照样跟着工作流的画风走。
+    - 自然语言风格不插标签（会破坏句子），改在句首点明画风。
     """
     out = dict(payload or {})
     opts = opts or {}
-    if not opt_bool(opts.get("persona_enabled"), True):
-        return out
-    if str((brief or {}).get("category") or "") not in PERSON_CATEGORIES:
-        return out
     key = _style_key(str(tag_style or ""))
+    cat = str((brief or {}).get("category") or "")
+
+    if opt_bool(opts.get("persona_enabled"), True):
+        if cat in PERSON_CATEGORIES and key == "danbooru":
+            out["prompt"] = _merge_tags(
+                out.get("prompt", ""),
+                str(opts.get("persona_tags") or DEFAULT_PERSONA_TAGS),
+                True,
+            )
+        neg = (
+            str(opts.get("persona_negative_zh") or DEFAULT_PERSONA_NEGATIVE_ZH)
+            if key == "natural"
+            else str(opts.get("persona_negative") or DEFAULT_PERSONA_NEGATIVE)
+        )
+        out["negative"] = _merge_tags(out.get("negative", ""), neg, False)
+
+    if not opt_bool(opts.get("style_anchor_enabled"), True):
+        return out
+    sc = normalize_scope(scope)
+    if sc == "both":
+        return out
+
     if key == "danbooru":
         out["prompt"] = _merge_tags(
             out.get("prompt", ""),
-            str(opts.get("persona_tags") or DEFAULT_PERSONA_TAGS),
+            ANCHOR_TAGS_ANIME if sc == "anime" else ANCHOR_TAGS_PHOTO,
             True,
         )
-    if key == "natural":
-        neg = str(opts.get("persona_negative_zh") or DEFAULT_PERSONA_NEGATIVE_ZH)
-    else:
-        neg = str(opts.get("persona_negative") or DEFAULT_PERSONA_NEGATIVE)
+        out["negative"] = _merge_tags(
+            out.get("negative", ""),
+            ANCHOR_NEG_ANIME if sc == "anime" else ANCHOR_NEG_PHOTO,
+            False,
+        )
+        return out
+
+    cur = str(out.get("prompt", "")).strip()
+    low = cur.lower()
+    hinted = (
+        ("anime" in low or "插画" in cur or "二次元" in cur)
+        if sc == "anime"
+        else ("photorealistic" in low or "photograph" in low or "写实" in cur)
+    )
+    if not hinted:
+        if key == "natural":
+            prefix = ANCHOR_PREFIX_NATURAL_ANIME if sc == "anime" else ANCHOR_PREFIX_NATURAL_PHOTO
+        else:
+            prefix = ANCHOR_PREFIX_EN_ANIME if sc == "anime" else ANCHOR_PREFIX_EN_PHOTO
+        out["prompt"] = (prefix + cur.lstrip("，,。. ")) if cur else prefix.rstrip("，, ")
+    neg = (
+        (ANCHOR_NEG_ZH_ANIME if sc == "anime" else ANCHOR_NEG_ZH_PHOTO)
+        if key == "natural"
+        else (ANCHOR_NEG_ANIME if sc == "anime" else ANCHOR_NEG_PHOTO)
+    )
     out["negative"] = _merge_tags(out.get("negative", ""), neg, False)
     return out
 

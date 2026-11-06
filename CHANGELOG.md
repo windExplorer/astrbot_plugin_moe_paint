@@ -1,5 +1,78 @@
 # 更新日志
 
+## v0.7.6（画风硬锚定：只画动漫不再只是一句空话）
+
+现象：「我虽然设置了全部都用动漫风格，但是提示词里面并没有任何『动漫』相关的字眼，
+导致有的工作流还是画的真人，不仅如此，还画的很丑，甚至出现老人、男人之类的」。
+
+根因（六处叠加）：
+
+1. `scope`（可画类型）**从来没有进过提示词**。`brief["scope"]` 在 `brief_text()` 里被丢掉；
+   `build_system_prompt(tag_style, opts)` 根本不接收它。设「只画动漫」只是让抽签跳过写真/肖像类，
+   LLM 收到的简报与系统提示词跟没设之前完全一样。
+2. `tag_style` 是按底模**独立**自动识别的。某条工作流被认成 Flux / 写实底模时，
+   系统提示词用的是 `natural_en` 那套，里面明写 "photorealistic SDXL checkpoints"、
+   "no tag dumps" —— 等于主动往写实方向写，和可画类型完全脱节。
+3. `style_pool_for(category)` 只看类别不看工作流可画类型。风景 / 星空 / 艺术 / 生态是
+   `both` 类，设了只画动漫照样抽得到，用的是全局风格池（含「胶片摄影颗粒感」
+   「暗调油画」「皮克斯式 3D 质感」）—— 动漫工作流抽到「胶片摄影颗粒感」，
+   简报里就写着胶片，LLM 自然往照片写。这是「画得很丑 / 画真人」的主因。
+4. `apply_persona()` 第一道 `if category not in PERSON_CATEGORIES: return`：景物类、
+   艺术类、人物肖像类**完全不加**任何排除负面词，正面人物标签也没有。
+5. 系统提示词里虽有中文的 `persona_text` 规则，但 `natural_en` 主体是英文、插一段中文
+   效果弱，LLM 也常不遵守纯自然语言约束；用了 `override_*` 完全覆盖时这段规则整段消失。
+6. `natural_en` 风格不加质量词（只有 danbooru 会补 `masterpiece, best quality...`），画质没兜底。
+
+### 修复
+
+**A. 写进输入**
+
+- `brief_text()` 输出新增「可画类型=只画动漫（二次元插画）/ 只画真人（写实摄影）/ 两者皆可」。
+- `build_system_prompt(tag_style, opts, scope)` 新增 scope 参数，按三套提示词风格各给一段
+  中/英文画风硬规则（必须二次元插画 / 必须写实摄影、禁止反向画风）。
+  **完全覆盖时也照样追加**——它是插件级硬约束，不是提示词模板内容，避免用户改完提示词又画成真人。
+- 用户补充的边界：风景 / 星空 / 艺术 / 生态**不是中性画风**，也得跟着工作流的可画类型走，
+  所以画风规则里明确写了「无人物题材同样适用」。
+
+**B. 输出硬拼接（不靠 LLM 自觉）**
+
+- `apply_persona(..., scope)` 新增画风锚定层：Danbooru 风格前置
+  `anime style, anime, 2d, illustration, cel shading, drawn`（只画真人则前置写真实标签）；
+  `natural` / `natural_en` 不插标签串，改在句首点明「一幅精美的二次元动漫插画，」/
+  "An exquisite anime-style illustration, "，已写过画风则不重复。
+- negative 一律追加反向画风排除词（`photorealistic, photo, 3d render, live action…` /
+  `anime, cartoon, illustration, 2d…`），写实线完全对称处理。
+- 句首画风前缀同时承担自然语言风格的质量兜底（精美 / exquisite / high-quality）。
+
+**C. 风格池按可画类型收窄**
+
+- `style_pool_for(category, scope)`：只画动漫一律 `STYLES_ANIME`、只画真人一律
+  `STYLES_PHOTO`、`both` 才按类别原有的收窄规则。动漫工作流不会再抽到「胶片摄影颗粒感」。
+
+**D. 人物锁全局化**
+
+- 人物排除负面词改为**所有类别都加**（此前非人物类整段跳过，正是景物图冒出老人/男人的原因）；
+  正面人物标签仍只给 `PERSON_CATEGORIES`，景物类不塞 `1girl` 以免毁风景。
+- 人物锚定与画风锚定是两个独立开关，互不影响：关掉人物锚定仍会拼画风标签，反之亦然。
+
+**E. 可回退 + 可观测**
+
+- 新增 `prompt.style_anchor_enabled`（bool，默认 `true`），关掉即退回 v0.7.5 行为
+  （可画类型只筛题材、不改提示词）；「提示词」页有开关与完整说明。
+- `debug_llm` 返回 `scope`，调试试跑页显示「可画类型」标签，并注明下面展示的是
+  **最终注入 ComfyUI 的文本**（含硬拼接），「LLM 原始返回」才是模型自己写的。
+- 模板行「生效：…」新增错配提示：可画类型=只画动漫却用自然语言/写实底模时，
+  提示换动漫底模——画风锚定不会换底模，写实底模变不出二次元。
+
+### 测试
+
+- `tests/test_prompter.py` 增补约 45 条：scope 归一化、简报带可画类型、三套系统提示词的
+  画风规则（含开关 / 完全覆盖 / 关闭）、风格池与 200 轮抽签不出现反向风格、
+  Danbooru 硬标签与幂等、自然语言句首前缀与去重、两套锚定互不干扰、入参不被修改。
+  旧断言 `persona_skips_scenery` 拆成「景物类仍不加 1girl」+「排除负面词现在全类别生效」两条。
+- `tests/test_schema.py` / `tests/test_config_coerce.py` 补 `prompt.style_anchor_enabled` 守卫；
+  README 更新「七·六」「八」两节、能力表、配置项速查与排障表。
+
 ## v0.7.5（可画类型：跟随萌绘也能逐条设，术语不再和「风格」打架）
 
 现象：「怎么对单个工作流配置可绘制的风格：真人还是动漫，或者两者皆可」。
