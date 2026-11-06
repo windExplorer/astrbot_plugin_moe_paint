@@ -26,6 +26,9 @@ DEFER_WAIT_SECONDS = 300
 # 单轮生成的总硬超时（秒）：内部各环节都有自己的预算，这层是防「彻底卡死」的兜底
 GEN_TIMEOUT_SECONDS = 1800
 
+# 按「上一张 + 间隔」算出来已经过期时，稍等几秒再跑（避免同一 tick 里空转）
+IMMEDIATE_DELAY_SECONDS = 3
+
 REASON_QUIET = "quiet"
 REASON_BUSY = "busy"
 REASON_DISABLED = "disabled"
@@ -42,6 +45,9 @@ class ScheduleState:
     # UI 必须靠这两个字段区分「正在画」和「调度卡住」。
     running_since: "datetime | None" = None
     running_note: str = ""
+    # 上一张的「开始时刻」（v0.7.2）：间隔一律以它为基准算，
+    # 这样出图耗时不会把周期拉长，改配置也不会从保存时刻重新起算。
+    last_started_at: "datetime | None" = None
 
     def running_for_sec(self) -> int:
         if self.running_since is None:
@@ -184,6 +190,27 @@ def initial_due(cfg: dict, now: datetime, rng: random.Random) -> datetime:
     return advance(cfg, now, rng)
 
 
+def due_from_last(
+    cfg: dict, last_at: "datetime | None", now: datetime, rng: random.Random
+) -> datetime:
+    """下一次计划点：以「上一张的开始时刻」为基准，而不是「现在」。
+
+    这条是用户明确要求的语义：**每 N 小时一张 = 上一张时间 + N**。
+    - 没有历史（首次安装/从未出图）→ now + 间隔；
+    - 有历史 → last_at + 间隔，出图耗时不会把周期拉长（画 5 分钟不等于 6 小时 5 分）；
+    - 算出来已经过期（间隔改短了、或停机很久）→ 说明现在就该画，返回 now + 几秒，
+      由循环立刻执行，而不是又推后一整个间隔。
+    """
+    # daily 模式是「墙上的时刻」（09:30 / 20:00），跟上一张没关系：
+    # 过了就等下一个时刻，不补画。interval 模式才按「上一张 + 间隔」。
+    if last_at is None or str(cfg.get("mode") or "interval").strip() == "daily":
+        return advance(cfg, now, rng)
+    nxt = advance(cfg, last_at, rng)
+    if nxt <= now:
+        return now + timedelta(seconds=IMMEDIATE_DELAY_SECONDS)
+    return nxt
+
+
 def cap_reached(cap, success_today: int) -> bool:
     """每日上限判定（纯函数）：cap<=0 = 不限；只数成功的（失败轮不占名额）。"""
     try:
@@ -226,7 +253,11 @@ async def run_loop(plugin) -> None:
                 continue
             now = datetime.now()
             if state.next_due is None:
-                state.next_due = initial_due(cfg, now, rng)
+                if state.last_started_at is not None:
+                    # 重启后：按「上一张 + 间隔」续上，而不是重新从 now 起算
+                    state.next_due = due_from_last(cfg, state.last_started_at, now, rng)
+                else:
+                    state.next_due = initial_due(cfg, now, rng)
             if now >= state.next_due:
                 quiet = quiet_span_of(cfg)
                 if quiet and in_quiet_hours(now.time(), quiet):
@@ -279,6 +310,7 @@ async def run_loop(plugin) -> None:
                         continue
                 # 立刻把「正在生成」摆到状态里：出图可能要几分钟，期间 next_due
                 # 还是旧的（已过期），不写这句话 UI 就会一直显示「下次生成 15:40」。
+                state.last_started_at = now
                 state.last_run_note = f"正在生成（{now.strftime('%H:%M')} 开始）"
                 logger.info(f"[萌萌绘卷] 到点开始生成（计划 {now.strftime('%m-%d %H:%M')}）")
                 try:
@@ -311,8 +343,11 @@ async def run_loop(plugin) -> None:
                             f"萌萌绘卷连续 {state.consecutive_failures} 次生成失败，"
                             f"已自动暂停调度。最近错误：{summary.get('error', '')[:160]}"
                         )
-                # 从「现在」起算下一轮（跑了一张图本身耗时也要算进间隔）
-                state.next_due = advance(cfg, datetime.now(), rng)
+                # 从「这一张的开始时刻」起算下一轮：周期 = 间隔本身，
+                # 出图耗时不再额外叠加（v0.7.2 用户要求的口径）。
+                state.next_due = due_from_last(
+                    cfg, state.last_started_at or now, datetime.now(), rng
+                )
                 continue
             wait = (state.next_due - now).total_seconds()
             await asyncio.sleep(min(max(wait, 1.0), 1800))

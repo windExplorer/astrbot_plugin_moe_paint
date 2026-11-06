@@ -54,7 +54,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.1",
+    "v0.7.2",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -120,6 +120,17 @@ class MoePaintPlugin(Star):
         try:
             self.store = gallery_store.Store(str(data_dir / "moe_paint.db"))
             await self.store.init()
+            # 重启后「上一张」的时间要从库里捞回来，否则下次计划会从启动时刻重新起算
+            try:
+                last_ts = await self.store.last_generation_ts()
+                if last_ts:
+                    self.sched.last_started_at = datetime.fromtimestamp(int(last_ts))
+                    logger.info(
+                        f"{PLUGIN_TAG} 上次生成开始于 "
+                        f"{self.sched.last_started_at:%Y-%m-%d %H:%M}，下次计划按它 + 间隔推算"
+                    )
+            except Exception as e:
+                logger.warning(f"{PLUGIN_TAG} 读取上次生成时间失败（从当前时间起算）: {e}")
             # 上次进程退出时可能留下 status=running 的记录（图库里会永远「生成中」且理由为空）
             stale = await self.store.fail_stale_running()
             if stale:
@@ -193,10 +204,22 @@ class MoePaintPlugin(Star):
             self._save()
 
     def reschedule(self) -> None:
-        """按当前配置重算下次计划点（改完调度配置立即生效，不用等旧时刻自然到期）。"""
+        """按当前配置重算下次计划点。
+
+        基准是**上一张的开始时刻**，不是「保存配置的时刻」——否则改一次间隔就
+        等于把这一轮往后推一整个周期（v0.7.2 用户反馈）。
+        """
         try:
-            self.sched.next_due = scheduler.advance(self._schedule_cfg(), datetime.now(), _PICK_RANDOM)
-            self.debug_log("schedule", f"已按新配置重算下次计划：{self.sched.next_due:%Y-%m-%d %H:%M}")
+            base = self.sched.last_started_at
+            if base is None and self.sched.last_run_ts:
+                base = datetime.fromtimestamp(int(self.sched.last_run_ts))
+            self.sched.next_due = scheduler.due_from_last(
+                self._schedule_cfg(), base, datetime.now(), _PICK_RANDOM
+            )
+            hint = f"以上一张 {base:%m-%d %H:%M} 为基准" if base else "无历史，从当前时间起算"
+            note = f"已按新配置重算下次计划：{self.sched.next_due:%Y-%m-%d %H:%M}（{hint}）"
+            logger.info(f"{PLUGIN_TAG} {note}")
+            self.debug_log("schedule", note)
         except Exception as e:
             logger.warning(f"{PLUGIN_TAG} 重算下次计划失败: {e}")
 

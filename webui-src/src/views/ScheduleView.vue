@@ -196,7 +196,7 @@ async function save() {
     "调度计划",
   );
   if (r.ok) {
-    message.success(`调度已保存（${r.changed} 项），下次计划已按新配置重算`);
+    message.success(`已保存 ${r.changed} 项：下次计划按「上一张的时间 + 新间隔」重算`);
     await refreshStatus();
   } else {
     message.error(`保存失败：${r.error}`);
@@ -418,7 +418,7 @@ onMounted(async () => {
     <!-- 保存 -->
     <div class="savebar">
       <div class="save-summary">
-        <div class="mp-sub">保存后立即生效</div>
+        <div class="mp-sub">保存后立即按「上一张的时间 + 新间隔」重算（已过期则马上画）</div>
         <div class="save-text">{{ preview }}</div>
       </div>
       <div class="mp-row">

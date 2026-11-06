@@ -123,5 +123,45 @@ elapsed = st.running_for_sec()
 check("running_for_sec", 124 <= elapsed <= 127, str(elapsed))
 check("gen_timeout_defined", scheduler.GEN_TIMEOUT_SECONDS >= 600, str(scheduler.GEN_TIMEOUT_SECONDS))
 
+# ---------- v0.7.2：下次计划 = 上一张 + 间隔（不是「现在 + 间隔」） ----------
+CFG_INT = {"mode": "interval", "interval_minutes": 360, "jitter_minutes": 0}
+NOW = datetime(2026, 11, 6, 15, 50)
+
+got = scheduler.due_from_last(CFG_INT, None, NOW, random.Random(1))
+check("due_no_history", got == NOW + timedelta(hours=6), str(got))
+
+last = datetime(2026, 11, 6, 12, 0)
+got = scheduler.due_from_last(CFG_INT, last, NOW, random.Random(1))
+check("due_from_last_base", got == datetime(2026, 11, 6, 18, 0), str(got))
+
+# 上一张 08:00 + 6h = 14:00 已过 → 立刻（几秒后），不能又推 6 小时
+got = scheduler.due_from_last(CFG_INT, datetime(2026, 11, 6, 8, 0), NOW, random.Random(1))
+check("due_overdue_immediate",
+      got == NOW + timedelta(seconds=scheduler.IMMEDIATE_DELAY_SECONDS), str(got))
+
+# jitter 只加不减
+CFG_J = {"mode": "interval", "interval_minutes": 360, "jitter_minutes": 30}
+got = scheduler.due_from_last(CFG_J, last, NOW, random.Random(1))
+check("due_jitter_not_early", got >= datetime(2026, 11, 6, 18, 0), str(got))
+
+# daily：上一张 10:00 → 今天 20:00
+CFG_D = {"mode": "daily", "daily_times": "09:30,20:00"}
+got = scheduler.due_from_last(CFG_D, datetime(2026, 11, 6, 10, 0), NOW, random.Random(1))
+check("due_daily_next_slot", got == datetime(2026, 11, 6, 20, 0), str(got))
+
+# daily 是墙上的时刻：09:30 早过了就等 20:00，不补画（与「上一张」无关）
+got = scheduler.due_from_last(CFG_D, datetime(2026, 11, 6, 8, 0), NOW, random.Random(1))
+check("due_daily_no_catchup", got == datetime(2026, 11, 6, 20, 0), str(got))
+got = scheduler.due_from_last(CFG_D, None, NOW, random.Random(1))
+check("due_daily_no_history", got == datetime(2026, 11, 6, 20, 0), str(got))
+
+# 改配置场景：上一张 09:00，间隔从 6h 改成 3h（12:00 已过）→ 立刻，而不是 18:50
+got = scheduler.due_from_last(
+    {"mode": "interval", "interval_minutes": 180, "jitter_minutes": 0},
+    datetime(2026, 11, 6, 9, 0), NOW, random.Random(1),
+)
+check("due_shorter_interval_catches_up",
+      got == NOW + timedelta(seconds=scheduler.IMMEDIATE_DELAY_SECONDS), str(got))
+
 print("scheduler:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

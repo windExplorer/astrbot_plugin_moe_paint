@@ -90,6 +90,10 @@ async def main() -> None:
         check("meta_roundtrip", await store.get_meta("rr_cursor") == "3")
         check("meta_default", await store.get_meta("none", "x") == "x")
 
+        # v0.7.2：重启后要靠它恢复「上一张是什么时候」
+        last_ts = await store.last_generation_ts()
+        check("last_ts_positive", last_ts >= 1000, str(last_ts))
+
         # 归档：内容寻址去重
         gdir = root / "gallery"
         data = b"png-bytes-0001"

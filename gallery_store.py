@@ -256,6 +256,20 @@ class Store:
             rows = [dict(r) for r in await cur.fetchall()]
         return rows, total
 
+    async def last_generation_ts(self) -> int:
+        """最近一条记录的 ts（生成开始时刻，秒）。
+
+        用途：重启后恢复「上一张是什么时候」，让下次计划 = 上一张 + 间隔，
+        而不是「启动时刻 + 间隔」。
+        """
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT MAX(ts) AS n FROM generations")
+            row = await cur.fetchone()
+        try:
+            return int(row[0] or 0)
+        except (TypeError, ValueError, IndexError):
+            return 0
+
     async def count_day_success(self, day: str) -> int:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
