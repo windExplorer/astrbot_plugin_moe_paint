@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS generations (
     starred         INTEGER NOT NULL DEFAULT 0,
     pruned          INTEGER NOT NULL DEFAULT 0,
     score           INTEGER,
-    score_reason    TEXT    NOT NULL DEFAULT ''
+    score_reason    TEXT    NOT NULL DEFAULT '',
+    ab              TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gen_ts      ON generations(ts);
 CREATE INDEX IF NOT EXISTS idx_gen_status  ON generations(status, ts);
@@ -68,7 +69,7 @@ _UPDATE_COLS = {
     "status", "reason", "category", "brief", "prompt", "negative", "tag_style",
     "workflow", "width", "height", "seed", "comfy_prompt_id", "image_relpath",
     "sha256", "caption", "llm_provider", "llm_latency_ms", "gen_latency_ms",
-    "error", "delivered_json", "starred", "pruned", "score", "score_reason",
+    "error", "delivered_json", "starred", "pruned", "score", "score_reason", "ab",
 }
 
 # 老库升级时要补的列（CREATE TABLE IF NOT EXISTS 不会给已有表加列）
@@ -76,6 +77,7 @@ _MIGRATE_COLUMNS = {
     "pruned": "INTEGER NOT NULL DEFAULT 0",
     "score": "INTEGER",
     "score_reason": "TEXT NOT NULL DEFAULT ''",
+    "ab": "TEXT NOT NULL DEFAULT ''",
 }
 
 _MIME = {
@@ -459,6 +461,20 @@ class Store:
             )
             out["score_count"] = int((row["n"] if row else 0) or 0)
             out["score_low"] = int((row["low_n"] if row else 0) or 0)
+            # A/B 对比（v0.7.9）：只统计有分的样本，没分的变体不进对比
+            cur = await db.execute(
+                "SELECT ab, AVG(score) AS avg_score, COUNT(score) AS n "
+                "FROM generations WHERE ab<>'' AND score IS NOT NULL "
+                "GROUP BY ab ORDER BY ab"
+            )
+            out["by_ab"] = [
+                {
+                    "ab": r["ab"],
+                    "score_avg": round(float(r["avg_score"]), 1) if r["avg_score"] is not None else None,
+                    "n": int(r["n"] or 0),
+                }
+                for r in await cur.fetchall()
+            ]
         return out
 
     async def mark_pruned(self, relpaths: list) -> int:

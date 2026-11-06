@@ -196,6 +196,12 @@ onMounted(refreshAll);
         <div class="stat-value">{{ stats?.score_avg != null ? stats.score_avg : "-" }}</div>
         <div class="stat-foot">
           已评分 {{ stats?.score_count ?? 0 }} 张 · 低分 {{ stats?.score_low ?? 0 }}
+          <template v-if="(stats?.by_ab || []).length">
+            ·
+            <span v-for="x in stats?.by_ab || []" :key="x.ab">
+              {{ x.ab }} {{ x.score_avg ?? "-" }}（{{ x.n }}）
+            </span>
+          </template>
         </div>
       </div>
     </section>

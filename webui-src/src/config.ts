@@ -44,6 +44,9 @@ export const KNOWN_KEYS = new Set<string>([
   "prompt.banned_tags",
   "prompt.strip_artists",
   "prompt.max_tags",
+  "prompt.ab_enabled",
+  "prompt.ab_a",
+  "prompt.ab_b",
   "schedule.mode",
   "schedule.interval_minutes",
   "schedule.jitter_minutes",
@@ -89,6 +92,12 @@ export const KNOWN_KEYS = new Set<string>([
   "refine.sampler_name",
   "refine.scheduler",
   "refine.timeout",
+  "time_sense.enabled",
+  "time_sense.latitude",
+  "time_sense.sync_light",
+  "time_sense.guard_retry",
+  "character.mode",
+  "character.name",
   "admin_notify_umo",
 ]);
 

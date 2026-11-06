@@ -433,6 +433,30 @@ async def h_prompt_preset(plugin) -> dict:
     return ok(res) if res.get("ok") else err(res.get("error") or "操作失败")
 
 
+async def h_characters(plugin) -> dict:
+    """GET：角色卡列表 + 当前模式（off / random / fixed）+ 当前时段。"""
+    cfg = plugin._sub("character")
+    return ok({
+        "items": await plugin.list_characters(),
+        "mode": str(cfg.get("mode") or "off"),
+        "name": str(cfg.get("name") or ""),
+        "phase": plugin.current_phase(),
+    })
+
+
+async def h_character_edit(plugin) -> dict:
+    """POST {action: save|delete, card?|name?}。"""
+    body = await _payload()
+    action = str(body.get("action") or "save").strip().lower()
+    if action == "delete":
+        res = await plugin.delete_character(str(body.get("name") or ""))
+    elif action == "save":
+        res = await plugin.save_character(body.get("card") if isinstance(body.get("card"), dict) else body)
+    else:
+        return err("action 必须是 save / delete")
+    return ok(res) if res.get("ok") else err(res.get("error") or "操作失败")
+
+
 async def h_debug_score(plugin) -> dict:
     """POST {id}：对已有记录跑一次成图自检（不改状态，只返回分数，用于校准阈值）。"""
     if plugin.store is None:
@@ -817,6 +841,8 @@ def register(plugin) -> None:
         ("/record/redraw", h_redraw, ["POST"]),
         ("/prompt/presets", h_prompt_presets, ["GET"]),
         ("/prompt/preset", h_prompt_preset, ["POST"]),
+        ("/characters", h_characters, ["GET"]),
+        ("/characters/edit", h_character_edit, ["POST"]),
         ("/debug/score", h_debug_score, ["POST"]),
         ("/stats", h_stats, ["GET"]),
         ("/workflows", h_workflows, ["GET"]),

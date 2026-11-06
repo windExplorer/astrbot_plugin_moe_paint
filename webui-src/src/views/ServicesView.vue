@@ -429,6 +429,66 @@ onMounted(loadConfig);
       </div>
     </div>
 
+    <!-- 时间一致性 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">时间一致性</div>
+        <n-button
+          size="small"
+          type="primary"
+          :loading="!!saving['时间一致性']"
+          @click="save([
+            'time_sense.enabled', 'time_sense.latitude',
+            'time_sense.sync_light', 'time_sense.guard_retry',
+          ], '时间一致性')"
+        >
+          保存
+        </n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        按「纬度 + 月份」估算日出日落，把当前时刻折成六个时段：光照词池跟着收窄、
+        系统提示词写一条硬规则、出图前再扫一遍「深夜却写正午烈日」这类矛盾。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">启用</span>
+          <n-switch
+            :value="cfgBool('time_sense.enabled', true)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('time_sense.enabled', v)"
+          />
+          <span class="mp-sub">关掉后行为与旧版完全一致</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">所在纬度</span>
+          <n-input-number
+            :value="cfgNum('time_sense.latitude', 35)"
+            :min="-66" :max="66" :step="0.1" size="small"
+            @update:value="(v: number | null) => cfgSet('time_sense.latitude', v ?? 35)"
+          />
+          <span class="mp-sub">北纬为正：北京 39.9 / 上海 31.2 / 广州 23.1</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">光照跟随时段</span>
+          <n-switch
+            :value="cfgBool('time_sense.sync_light', true)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('time_sense.sync_light', v)"
+          />
+          <span class="mp-sub">深夜只抽月光/霓虹/星空；想随时画白天就关掉</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">矛盾重写</span>
+          <n-switch
+            :value="cfgBool('time_sense.guard_retry', true)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('time_sense.guard_retry', v)"
+          />
+          <span class="mp-sub">检测到时段矛盾才多一次 LLM 调用</span>
+        </label>
+      </div>
+    </div>
+
     <!-- 图库与通知 -->
     <div class="mp-card">
       <div class="mp-card-head">

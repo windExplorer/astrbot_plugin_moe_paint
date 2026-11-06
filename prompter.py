@@ -12,6 +12,8 @@ import json
 import random
 import re
 
+from . import daylight
+
 # --------------------------------------------------------------------------- #
 # 内置词池（配置 theme_extra 可追加；disabled_categories 可停用整类）
 # --------------------------------------------------------------------------- #
@@ -635,6 +637,7 @@ def draw_brief(
     weights: dict | None = None,
     scope: str = "both",
     scopes: dict | None = None,
+    phase: str = "",
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -683,7 +686,11 @@ def draw_brief(
     category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
     subject = rng.choice(cat_pool[category])
     style = rng.choice(_merge_words(style_pool_for(category, wf_scope), extra.get("风格")))
-    light = rng.choice(_merge_words(LIGHTS, extra.get("光色")))
+    # 光色池按时段收窄（v0.7.9）：凌晨三点不该抽到「黄昏暖光」。
+    # 用户自己追加的光色词不参与过滤 —— 那是显式意图，不该被时段否决。
+    extra_lights = _merge_words([], extra.get("光色"))
+    light_pool = daylight.filter_lights(LIGHTS, phase) if phase else list(LIGHTS)
+    light = rng.choice(light_pool + extra_lights) if (light_pool or extra_lights) else "自然光"
     mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
 
     comp_pool = list(COMPOSITIONS)
@@ -703,7 +710,7 @@ def draw_brief(
     lens = rng.choice(LENS_PHOTO) if group == "photo" else ""
     medium = rng.choice(MEDIUM_ANIME) if group == "anime" else ""
 
-    return {
+    brief = {
         "category": category,
         "subject": subject,
         "style": style,
@@ -715,6 +722,9 @@ def draw_brief(
         "lens": lens,
         "medium": medium,
     }
+    if phase:
+        brief["phase"] = str(phase)
+    return brief
 
 
 def brief_text(brief: dict, theme: str = "") -> str:
@@ -736,6 +746,10 @@ def brief_text(brief: dict, theme: str = "") -> str:
         text += f"；镜头={brief['lens']}"
     if str(brief.get("medium") or "").strip():
         text += f"；成品形态={brief['medium']}"
+    if str(brief.get("phase") or "").strip():
+        text += f"；时段={daylight.phase_label(brief['phase'])}"
+    if str(brief.get("character") or "").strip():
+        text += f"；角色={brief['character']}"
     return text
 
 
@@ -816,7 +830,9 @@ def opt_bool(v, default: bool = True) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
 
 
-def build_system_prompt(tag_style: str, opts: dict | None = None, scope: str = "both") -> str:
+def build_system_prompt(
+    tag_style: str, opts: dict | None = None, scope: str = "both", phase: str = ""
+) -> str:
     """按提示词风格 + 工作流可画类型给系统提示词。
 
     opts（配置 prompt 分组）：
@@ -834,6 +850,8 @@ def build_system_prompt(tag_style: str, opts: dict | None = None, scope: str = "
     rule = ""
     if sc != "both" and opt_bool(opts.get("style_anchor_enabled"), True):
         rule = _SCOPE_RULES[sc][key]
+    # 时段硬规则（v0.7.9）：与画风规则同级，完全覆盖系统提示词时也照样追加
+    time_rule = daylight.rule_for_phase(phase) if phase else ""
 
     override = str(opts.get(f"override_{key}") or "").strip()
     if override:
@@ -841,6 +859,8 @@ def build_system_prompt(tag_style: str, opts: dict | None = None, scope: str = "
             override = override.rstrip() + "\n" + _SYSTEM_COMMON_TAIL.strip()
         if rule:
             override = override.rstrip() + "\n" + rule + "\n"
+        if time_rule:
+            override = override.rstrip() + "\n" + time_rule + "\n"
         return override
 
     body = _SYSTEM_BODIES[key]
@@ -854,6 +874,8 @@ def build_system_prompt(tag_style: str, opts: dict | None = None, scope: str = "
         rules.append(extra)
     if rule:
         rules.append(rule)
+    if time_rule:
+        rules.append(time_rule)
     if rules:
         body += "\n【附加规则（优先于以上通用要求）】\n" + "\n".join(rules) + "\n"
     return body + _SYSTEM_COMMON_TAIL
@@ -949,6 +971,25 @@ def apply_persona(
         else (ANCHOR_NEG_ANIME if sc == "anime" else ANCHOR_NEG_PHOTO)
     )
     out["negative"] = _merge_tags(out.get("negative", ""), neg, False)
+    return out
+
+
+def apply_character(payload: dict, card: dict | None, tag_style: str) -> dict:
+    """把角色卡并进 payload（v0.7.9）。
+
+    - danbooru：角色标签前置（`hatsune miku, twintails…`），负向合并卡片的排除词；
+    - 自然语言：不插标签串（会破坏句子），角色名已经写进简报交给 LLM 描述。
+    负向对所有风格都合并（挡住「画错人」的常见描述）。
+    """
+    out = dict(payload or {})
+    if not card:
+        return out
+    tags = str(card.get("tags") or "").strip()
+    neg = str(card.get("negative") or "").strip()
+    if tags and _style_key(str(tag_style or "")) == "danbooru":
+        out["prompt"] = _merge_tags(out.get("prompt", ""), tags, True)
+    if neg:
+        out["negative"] = _merge_tags(out.get("negative", ""), neg, False)
     return out
 
 
@@ -1145,12 +1186,13 @@ def parse_draw_args(text) -> dict:
     --style  强制风格，覆盖抽签的风格层（如 "胶片摄影颗粒感"）
     --ratio  长宽比（3:2 / 横 / 竖 / 方），同时决定朝向
     --seed   固定种子，便于复现
+    --char   指定角色卡（按名字或别名命中）
     认不出的开关写进 error，主题词是其余所有文本。纯函数，便于自检。
     """
     tokens = str(text or "").split()
     out: dict = {
         "theme": "", "negative": "", "style": "", "ratio": None,
-        "orientation": "", "seed": None, "error": "",
+        "orientation": "", "seed": None, "char": "", "error": "",
     }
     rest: list[str] = []
     neg: list[str] = []
@@ -1185,8 +1227,12 @@ def parse_draw_args(text) -> dict:
                 out["seed"] = abs(int(float(value))) % (2**63)
             except (TypeError, ValueError):
                 out["error"] = f"种子必须是整数：{value}"
+        elif key in ("--char", "--角色"):
+            out["char"] = value[:30]
         else:
-            out["error"] = f"不认识的开关：{key}（可用 --no / --style / --ratio / --seed）"
+            out["error"] = (
+                f"不认识的开关：{key}（可用 --no / --style / --ratio / --seed / --char）"
+            )
     out["theme"] = " ".join(rest).strip()
     out["negative"] = ", ".join(x for x in neg if x)
     return out

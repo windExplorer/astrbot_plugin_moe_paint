@@ -106,6 +106,19 @@ async def main() -> None:
         check("stats_score_avg", st2["score_avg"] == 88.0 and st2["score_count"] == 1, str(st2["score_avg"]))
         check("stats_score_low", st2["score_low"] == 0, str(st2["score_low"]))
 
+        # v0.7.9：A/B 变体落库 + 对比统计
+        await store.update_generation(rid, ab="A")
+        rid_ab = await store.insert_running(ts=2100, day="2026-11-06", reason="t",
+                                           category="c", brief="{}", workflow="w",
+                                           tag_style="danbooru")
+        await store.update_generation(rid_ab, status="success", ab="B", score=70)
+        st3 = await store.stats()
+        ab_map = {x["ab"]: x for x in st3.get("by_ab", [])}
+        check("stats_by_ab_two", set(ab_map) == {"A", "B"}, str(st3.get("by_ab")))
+        check("stats_by_ab_avg", ab_map.get("A", {}).get("score_avg") == 88.0
+              and ab_map.get("B", {}).get("score_avg") == 70.0, str(ab_map))
+        check("stats_score_avg_after", st3["score_count"] == 2, str(st3["score_count"]))
+
         # v0.7.8：空图体检（体积兜底一定生效；像素判断要 Pillow）
         check("blank_empty", gallery_store.suspect_blank(b"") != "")
         check("blank_too_small", "过小" in gallery_store.suspect_blank(b"x" * 100))

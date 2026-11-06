@@ -40,6 +40,9 @@ const llmRes = ref<LlmPreview | null>(null);
 const SCOPE_LABEL: Record<string, string> = {
   anime: "只画动漫", photo: "只画真人", both: "两者皆可",
 };
+const PHASE_LABEL: Record<string, string> = {
+  dawn: "黎明", morning: "上午", day: "白天", dusk: "黄昏", night: "入夜", deep_night: "深夜",
+};
 
 const umo = ref("");
 const testText = ref("");
@@ -314,6 +317,15 @@ onMounted(async () => {
               :type="llmRes.tag_count > 75 ? 'warning' : 'default'"
             >
               标签 {{ llmRes.tag_count }}
+            </n-tag>
+            <n-tag v-if="llmRes.phase" size="small" :bordered="false">
+              时段 {{ PHASE_LABEL[llmRes.phase] || llmRes.phase }}
+            </n-tag>
+            <n-tag v-if="llmRes.character" size="small" :bordered="false" type="info">
+              角色 {{ llmRes.character }}
+            </n-tag>
+            <n-tag v-if="llmRes.time_fixed" size="small" :bordered="false" type="warning">
+              已按时段纠偏
             </n-tag>
             <span class="mp-sub">{{ llmRes.llm_provider }}</span>
           </div>

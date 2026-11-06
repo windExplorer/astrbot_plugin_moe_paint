@@ -146,6 +146,24 @@
         "default": 75,
         "hint": "仅 danbooru 风格。SD1.5 的 CLIP 只有 77 token，超出部分完全不生效；超限时按「主体/外观优先」截断。0 = 不限"
       },
+      "ab_enabled": {
+        "description": "A/B 测试开关",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后每次生成按 A→B 轮换追加「变体规则」，并把用的是哪一版记进记录；配合成图自检的平均分比较哪套规则更好。需要 A 和 B 都填了内容才生效"
+      },
+      "ab_a": {
+        "description": "A 版附加规则",
+        "type": "text",
+        "default": "",
+        "hint": "追加在系统提示词末尾；写一组明确的差异点（如「偏好低饱和冷调、电影感构图」）"
+      },
+      "ab_b": {
+        "description": "B 版附加规则",
+        "type": "text",
+        "default": "",
+        "hint": "另一组规则；与 A 只有一个变量不同才比得出结论"
+      },
       "style_anchor_enabled": {
         "description": "启用画风硬锚定",
         "type": "bool",
@@ -616,6 +634,59 @@
         "type": "int",
         "default": 300,
         "hint": "包含重新加载模型与排队的时间；超时按「用原图」处理"
+      }
+    },
+    "default": {}
+  },
+  "time_sense": {
+    "description": "时间一致性",
+    "type": "object",
+    "hint": "按「纬度 + 月份」估算日出日落，把当前时刻折成六个时段：收窄光照词池、给系统提示词一条硬规则、出图前再扫一遍矛盾。让凌晨三点的图不会写着「正午烈日」",
+    "items": {
+      "enabled": {
+        "description": "启用时间一致性",
+        "type": "bool",
+        "default": true,
+        "hint": "关掉后行为与旧版完全一致（光照随机、系统提示词里没有时段规则）"
+      },
+      "latitude": {
+        "description": "所在纬度",
+        "type": "float",
+        "default": 35.0,
+        "hint": "北纬为正（北京约 39.9、上海 31.2、广州 23.1）；只影响日出日落估算，差几度只差几分钟"
+      },
+      "sync_light": {
+        "description": "光照跟随时段",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后光色词池按时段收窄（深夜只抽月光/霓虹/星空）。想随时画白天就关掉这一项，系统提示词的时段规则仍然生效"
+      },
+      "guard_retry": {
+        "description": "矛盾重写",
+        "type": "bool",
+        "default": true,
+        "hint": "出图前扫提示词：若在深夜写了「正午烈日」这类矛盾，带原因让模型重写一次。会多一次 LLM 调用，但只在检测到矛盾时才发生"
+      }
+    },
+    "default": {}
+  },
+  "character": {
+    "description": "角色卡",
+    "type": "object",
+    "hint": "角色卡 = 一组固定标签（+ 排除词），让同一个人物跨图长相一致。卡片在「主题词池」页维护；指令里也可用 --char 名字 临时指定",
+    "items": {
+      "mode": {
+        "description": "使用方式",
+        "type": "string",
+        "options": ["off", "random", "fixed"],
+        "default": "off",
+        "hint": "off=不用角色卡；random=每轮随机抽一张；fixed=固定用下面那张。指令 --char 名字 优先于这里"
+      },
+      "name": {
+        "description": "固定角色名",
+        "type": "string",
+        "default": "",
+        "hint": "mode=fixed 时用；填角色卡的名字或别名"
       }
     },
     "default": {}

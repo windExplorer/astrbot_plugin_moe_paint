@@ -27,6 +27,9 @@ const PROMPT_KEYS = [
   "prompt.banned_tags",
   "prompt.strip_artists",
   "prompt.max_tags",
+  "prompt.ab_enabled",
+  "prompt.ab_a",
+  "prompt.ab_b",
 ];
 
 /** 画风硬锚定总开关（关掉则退回「可画类型只筛题材」的旧行为）。 */
@@ -284,6 +287,52 @@ onMounted(async () => {
             @update:value="(v: number | null) => set('prompt.max_tags', v ?? 75)"
           />
           <span class="mp-sub">SD1.5 只有 77 token，超出部分不生效</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- A/B 测试 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">A/B 测试（两套附加规则轮换）</div>
+        <n-button size="small" type="primary" :loading="!!saving['提示词']" @click="save">保存本页</n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        开启后每轮按 A→B 轮换，把对应规则追加在系统提示词末尾，并把用的是哪一版记进记录。
+        配合「成图自检」的平均分比较哪套更好（总览「平均质检」会显示 A/B 对比）。
+        <b>A 和 B 都要填</b>才生效；只改一个变量才比得出结论。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">启用 A/B</span>
+          <n-switch
+            :value="cfgBool('prompt.ab_enabled', false)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.ab_enabled', v)"
+          />
+          <span class="mp-sub">需要成图自检才有分数可比</span>
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">A 版附加规则</span>
+          <n-input
+            :value="String(cfgGet('prompt.ab_a', ''))"
+            type="textarea"
+            :rows="3"
+            size="small"
+            placeholder="如：偏好低饱和冷调、电影感构图、少用暖色"
+            @update:value="(v: string) => set('prompt.ab_a', v)"
+          />
+        </label>
+        <label class="mp-field mp-field--wide">
+          <span class="label">B 版附加规则</span>
+          <n-input
+            :value="String(cfgGet('prompt.ab_b', ''))"
+            type="textarea"
+            :rows="3"
+            size="small"
+            placeholder="如：偏好高饱和暖色、强烈的光影对比"
+            @update:value="(v: string) => set('prompt.ab_b', v)"
+          />
         </label>
       </div>
     </div>

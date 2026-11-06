@@ -135,6 +135,8 @@ export interface GenRecord {
   /** 成图自检分数（0~100；没开自检时为 null） */
   score?: number | null;
   score_reason?: string;
+  /** A/B 变体标签（A / B；未开 A/B 时为空） */
+  ab?: string;
   delivered?: DeliveredItem[];
 }
 
@@ -245,6 +247,23 @@ export interface StatsPayload {
   score_avg?: number | null;
   score_count?: number;
   score_low?: number;
+  /** A/B 对比（只含有分数的样本） */
+  by_ab?: { ab: string; score_avg: number | null; n: number }[];
+}
+
+export interface CharacterCard {
+  name: string;
+  aliases: string[];
+  tags: string;
+  negative: string;
+  note: string;
+}
+
+export interface CharactersPayload {
+  items: CharacterCard[];
+  mode: string;
+  name: string;
+  phase: string;
 }
 
 export interface AnimaServer {
@@ -322,6 +341,12 @@ export interface LlmPreview {
   tag_count?: number;
   /** 指令参数解析问题（有值说明某个开关被忽略） */
   args_note?: string;
+  /** 当前时段（时间一致性关掉时为空） */
+  phase?: string;
+  /** 本轮命中的角色卡名字 */
+  character?: string;
+  /** 是否因「与时段矛盾」被纠偏重写过 */
+  time_fixed?: boolean;
 }
 
 export interface ProviderRow {
@@ -420,6 +445,20 @@ export function apiPromptPresetDraw(name: string) {
 /** 对已有记录跑一次成图自检（用于校准阈值，不改状态）。 */
 export function apiDebugScore(id: number) {
   return apiPost<{ score: number; issues: string }>("/debug/score", { id }, 120000);
+}
+
+// ---------------------------------------------------------------- 角色卡
+
+export function apiCharacters() {
+  return apiGet<CharactersPayload>("/characters", 15000);
+}
+
+export function apiCharacterSave(card: CharacterCard) {
+  return apiPost<{ name: string }>("/characters/edit", { action: "save", card });
+}
+
+export function apiCharacterDelete(name: string) {
+  return apiPost<{ ok: boolean }>("/characters/edit", { action: "delete", name });
 }
 
 export interface AnimaWorkflowRow {

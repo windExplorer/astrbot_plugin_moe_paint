@@ -76,6 +76,7 @@ $includeList = @(
 "errfmt.py",         # error text fallbacks (never empty reasons; unit-tested)
     "comfy_client.py",   # ComfyUI HTTP client (adapted from anima, AGPL same-source)
     "prompter.py",       # diversity draw + LLM JSON contract
+    "daylight.py",       # sunrise/sunset estimate + time-phase consistency (pure stdlib)
     "workflow_mgr.py",   # workflow templates: load/locate/inject/rotate
     "scheduler.py",      # schedule loop (pure judges + thin shell)
     "gallery_store.py",  # sqlite records + sha256 archive + LRU

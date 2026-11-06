@@ -17,8 +17,9 @@ _LOADED: dict = {}
 # 模块间相对导入的依赖序（被依赖者先加载）
 _DEPS = {
     "workflow_mgr": ["prompter"],
-    "delivery": [],
-    "main": ["comfy_client", "prompter", "workflow_mgr", "gallery_store",
+    "prompter": ["daylight"],
+    "delivery": ["config_coerce"],
+    "main": ["comfy_client", "daylight", "prompter", "workflow_mgr", "gallery_store",
              "delivery", "scheduler", "webui_api"],
 }
 

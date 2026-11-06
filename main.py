@@ -29,14 +29,16 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.star.filter.command import GreedyStr
 
 from . import (
-    comfy_client, config_coerce, delivery, errfmt, gallery_store, prompter,
-    scheduler, webui_api, workflow_mgr,
+    comfy_client, config_coerce, daylight, delivery, errfmt, gallery_store,
+    prompter, scheduler, webui_api, workflow_mgr,
 )
 
 PLUGIN_NAME = "astrbot_plugin_moe_paint"
 PLUGIN_TAG = "[萌萌绘卷]"
 # 提示词收藏在 meta 表里的键前缀（preset:<名字>）——不占主表列，删改都轻
 PRESET_PREFIX = "preset:"
+# 角色卡同理（char:<名字>）
+CHAR_PREFIX = "char:"
 # 关联萌绘（ComfyUI萌绘）的插件名：只读它的配置取服务器地址，不调用其内部接口
 ANIMA_PLUGIN_NAME = "astrbot_plugin_comfyui_anima"
 
@@ -57,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.8",
+    "v0.7.9",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -67,8 +69,8 @@ class MoePaintPlugin(Star):
         global comfy_client, config_coerce, delivery, errfmt, gallery_store, prompter, scheduler, webui_api, workflow_mgr
         try:
             for _dep in (
-                "comfy_client", "prompter", "workflow_mgr", "config_coerce", "errfmt",
-                "gallery_store", "delivery", "scheduler", "webui_api",
+                "comfy_client", "daylight", "prompter", "workflow_mgr", "config_coerce",
+                "errfmt", "gallery_store", "delivery", "scheduler", "webui_api",
             ):
                 try:
                     _mod = importlib.import_module(f"{__package__}.{_dep}")
@@ -730,8 +732,17 @@ class MoePaintPlugin(Star):
             text = "".join(parts).strip()
         return text
 
-    async def _llm_prompt(self, brief: dict, tpl: "workflow_mgr.Template") -> tuple[dict, str, float]:
-        """按简报生成 JSON 契约载荷；解析失败重试 1 次（更严指令）。返回 (载荷, provider标签, 耗时ms)。"""
+    async def _llm_prompt(
+        self, brief: dict, tpl: "workflow_mgr.Template",
+        char: "dict | None" = None, ab_text: str = "", phase: str = "",
+    ) -> tuple[dict, str, float]:
+        """按简报生成 JSON 契约载荷；解析失败重试 1 次（更严指令）。
+
+        返回 (载荷, provider标签, 耗时ms)。v0.7.9 新增：
+        - `phase`：时段（写进系统提示词的硬规则 + 输出后扫矛盾）；
+        - `char`：角色卡（danbooru 前置角色标签、负向合并排除词）；
+        - `ab_text`：A/B 变体文本，追加在系统提示词末尾。
+        """
         provider = await self._provider()
         if provider is None:
             raise RuntimeError("没有可用 LLM 提供商（先在 WebUI 配置好对话模型，或在本插件配置里指定 provider_id）")
@@ -741,8 +752,35 @@ class MoePaintPlugin(Star):
         # 工作流可画类型必须一路传到提示词：系统提示词的画风硬规则 + 出图后的
         # 硬拼接标签，两处都要用同一个值，否则又会「设了只画动漫却画出真人」。
         scope = str(getattr(tpl, "scope", "both") or "both")
-        sys_prompt = prompter.build_system_prompt(tpl.tag_style, opts, scope)
+        sys_prompt = prompter.build_system_prompt(tpl.tag_style, opts, scope, phase=phase)
+        ab_text = str(ab_text or "").strip()
+        if ab_text:
+            sys_prompt = sys_prompt.rstrip() + "\n【本轮附加规则】\n" + ab_text + "\n"
         user_prompt = prompter.build_user_prompt(brief)
+
+        quality = str(getattr(tpl, "quality_prefix", "") or "").strip()
+        extra_q = str(opts.get("quality_extra") or "").strip()
+        if extra_q:
+            quality = f"{quality}, {extra_q}".strip(", ") if quality else extra_q
+
+        def finalize(payload: dict) -> dict:
+            """落地顺序（每一步只用前面已确定的字段，互不覆盖）。
+
+            ① 按风格清洗：danbooru 解权重 / 转义括号 / 去重 / 去 artist / 裁标签，
+               禁词从正向剔掉并写进负向；
+            ② 人物锚定（补人物标签 + 排除负面词，画风锚定在它内部）；
+            ③ 角色卡（danbooru 前置角色标签 + 负向）；
+            ④ 质量词放最前（系统提示里承诺「由系统添加」，这里真正落地）；
+            ⑤ 通用负面基线垫到负向最前（LLM 给空串时也有兜底）。
+            """
+            out = prompter.normalize_payload(payload, tpl.tag_style, opts)
+            out = prompter.apply_persona(out, tpl.tag_style, brief, opts, scope)
+            out = prompter.apply_character(out, char, tpl.tag_style)
+            out["prompt"] = prompter.apply_quality_prefix(out.get("prompt", ""), quality)
+            out = prompter.apply_negative_base(out, tpl.tag_style, opts)
+            out["_tag_count"] = len(prompter.split_tag_list(out.get("prompt", "")))
+            return out
+
         t0 = time.monotonic()
         try:
             text = await self._llm_text(provider, sys_prompt, user_prompt)
@@ -757,22 +795,30 @@ class MoePaintPlugin(Star):
             )
             payload = prompter.parse_llm_payload(text)
         payload["_raw"] = text[:4000]
-        # v0.7.8 落地顺序（每一步都只用前面已确定的字段，互不覆盖）：
-        # ① 按风格清洗 LLM 输出：danbooru 解权重 / 转义括号 / 去重 / 去 artist / 裁标签，
-        #    并把禁词从正向剔掉、写进负向；
-        # ② 人物锚定（补人物标签 + 排除负面词）；
-        # ③ 画风锚定（在 apply_persona 内部）；
-        # ④ 质量词放最前（系统提示里承诺「由系统添加」，这里真正落地）；
-        # ⑤ 通用负面基线垫到负向最前（LLM 给空串时也有兜底）。
-        payload = prompter.normalize_payload(payload, tpl.tag_style, opts)
-        payload = prompter.apply_persona(payload, tpl.tag_style, brief, opts, scope)
-        quality = str(getattr(tpl, "quality_prefix", "") or "").strip()
-        extra_q = str(opts.get("quality_extra") or "").strip()
-        if extra_q:
-            quality = f"{quality}, {extra_q}".strip(", ") if quality else extra_q
-        payload["prompt"] = prompter.apply_quality_prefix(payload.get("prompt", ""), quality)
-        payload = prompter.apply_negative_base(payload, tpl.tag_style, opts)
-        payload["_tag_count"] = len(prompter.split_tag_list(payload.get("prompt", "")))
+        payload = finalize(payload)
+
+        # 时间一致性兜底（v0.7.9）：简报已经按时段收窄了光色、系统提示词也写了硬规则，
+        # 但模型仍可能写出「深夜 + 正午烈日」。命中矛盾就带着原因重写一次；再不合就
+        # 保留原样（出图比卡在这一步重要），只记日志。
+        if phase and self._time_guard():
+            hits = daylight.conflicts(payload.get("prompt", ""), phase)
+            if hits:
+                logger.info(
+                    f"{PLUGIN_TAG} 提示词与时段矛盾（{'、'.join(hits[:3])}），纠偏重写一次"
+                )
+                try:
+                    fixed_text = await self._llm_text(
+                        provider, sys_prompt,
+                        user_prompt + "\n\n" + daylight.correct_hint(hits, phase),
+                    )
+                    fixed = prompter.parse_llm_payload(fixed_text)
+                    fixed["_raw"] = fixed_text[:4000]
+                    fixed["_time_fixed"] = 1
+                    payload = finalize(fixed)
+                except Exception as e:
+                    logger.warning(
+                        f"{PLUGIN_TAG} 时段纠偏失败（保留原提示词）: {errfmt.format_exc(e)}"
+                    )
         return payload, label, (time.monotonic() - t0) * 1000
 
     async def debug_llm(self, theme: str = "") -> dict:
@@ -792,6 +838,7 @@ class MoePaintPlugin(Star):
             tpl, _ = workflow_mgr.pick_template(
                 self._templates, mode, _PICK_RANDOM, last_key, legacy
             )
+            phase = self.current_phase()
             brief = prompter.draw_brief(
                 _PICK_RANDOM,
                 disabled_categories=self._disabled_categories(),
@@ -799,6 +846,7 @@ class MoePaintPlugin(Star):
                 weights=self._category_weights(),
                 scope=getattr(tpl, "scope", "both"),
                 scopes=self._category_scopes(),
+                phase=phase if self._light_sync() else "",
             )
             args = prompter.parse_draw_args(theme)
             if args["theme"]:
@@ -808,13 +856,20 @@ class MoePaintPlugin(Star):
                 brief["style"] = args["style"]
             if args["orientation"]:
                 brief["orientation"] = args["orientation"]
+            char = await self._pick_character(args)
+            if char:
+                brief["character"] = str(char.get("name") or "")
             out["brief"] = brief
+            out["phase"] = phase
+            out["character"] = str((char or {}).get("name") or "")
             tag_style = tpl.tag_style if tpl else "danbooru"
             out["tag_style"] = tag_style
             out["scope"] = str(getattr(tpl, "scope", "both") or "both")
             out["template"] = tpl.name if tpl else "（无可用模板，仅测提示词）"
             sizes = tpl.sizes if tpl else prompter.SIZE_PRESETS["sdxl"]
-            payload, label, ms = await self._llm_prompt(brief, tpl or workflow_mgr.Template(name="", file=""))
+            payload, label, ms = await self._llm_prompt(
+                brief, tpl or workflow_mgr.Template(name="", file=""), char=char, phase=phase
+            )
             width, height = prompter.pick_size(
                 sizes, brief["orientation"], brief["composition"], _PICK_RANDOM,
                 ratio=args.get("ratio"),
@@ -825,6 +880,7 @@ class MoePaintPlugin(Star):
                 llm_provider=label, llm_ms=round(ms, 1), size={"width": width, "height": height},
                 tag_count=int(payload.get("_tag_count") or 0),
                 args_note=str(args.get("error") or ""),
+                time_fixed=bool(payload.get("_time_fixed")),
             )
             self.debug_log("llm", f"试跑成功（{label}，{ms / 1000:.1f}s，{width}x{height}）")
         except Exception as e:
@@ -1111,6 +1167,141 @@ class MoePaintPlugin(Star):
         logger.info(f"{PLUGIN_TAG} 已清理改名后不再引用的工作流文件: {old}")
 
     # ------------------------------------------------------------------ #
+    # 时间一致性 / 角色卡 / A-B（v0.7.9）
+    # ------------------------------------------------------------------ #
+
+    def _time_cfg(self) -> dict:
+        return self._sub("time_sense")
+
+    def _time_enabled(self) -> bool:
+        return config_coerce.truthy(self._time_cfg().get("enabled", True), True)
+
+    def _time_guard(self) -> bool:
+        """出图前扫矛盾的开关（关掉就只靠简报与系统提示词约束）。"""
+        return self._time_enabled() and config_coerce.truthy(
+            self._time_cfg().get("guard_retry", True), True
+        )
+
+    def _light_sync(self) -> bool:
+        """光色池是否跟时段走（关掉可以随时画白天）。"""
+        return self._time_enabled() and config_coerce.truthy(
+            self._time_cfg().get("sync_light", True), True
+        )
+
+    def current_phase(self) -> str:
+        """当前时段 key（deep_night / dawn / …）；时间一致性关掉时返回空串。"""
+        if not self._time_enabled():
+            return ""
+        try:
+            lat = float(self._time_cfg().get("latitude") or 35.0)
+        except (TypeError, ValueError):
+            lat = 35.0
+        try:
+            return daylight.phase_of(datetime.now(), lat)
+        except Exception:
+            return ""
+
+    async def list_characters(self) -> list:
+        if self.store is None:
+            return []
+        out: list[dict] = []
+        try:
+            rows = await self.store.list_meta(CHAR_PREFIX)
+        except Exception as e:
+            logger.warning(f"{PLUGIN_TAG} 读取角色卡失败: {e}")
+            return []
+        for key, val in rows:
+            try:
+                data = json.loads(val or "{}")
+            except Exception:
+                continue
+            if not isinstance(data, dict) or not data.get("name"):
+                continue
+            out.append({
+                "name": str(data.get("name") or ""),
+                "aliases": [str(a) for a in (data.get("aliases") or []) if str(a).strip()],
+                "tags": str(data.get("tags") or ""),
+                "negative": str(data.get("negative") or ""),
+                "note": str(data.get("note") or ""),
+            })
+        out.sort(key=lambda x: x["name"])
+        return out
+
+    async def save_character(self, card: dict) -> dict:
+        """新建/覆盖一张角色卡（按 name 存 meta，改名会另存一份）。"""
+        if self.store is None:
+            return {"ok": False, "error": "记录库不可用"}
+        card = card if isinstance(card, dict) else {}
+        name = str(card.get("name") or "").strip()[:40]
+        if not name:
+            return {"ok": False, "error": "角色名不能为空"}
+        aliases = card.get("aliases")
+        if isinstance(aliases, str):
+            aliases = [a.strip() for a in aliases.replace("，", ",").split(",")]
+        aliases = [str(a).strip() for a in (aliases or []) if str(a).strip()]
+        payload = {
+            "name": name,
+            "aliases": aliases[:8],
+            "tags": str(card.get("tags") or "").strip(),
+            "negative": str(card.get("negative") or "").strip(),
+            "note": str(card.get("note") or "").strip()[:200],
+        }
+        await self.store.set_meta(
+            f"{CHAR_PREFIX}{name}", json.dumps(payload, ensure_ascii=False)
+        )
+        self.debug_log("character", f"已保存角色卡「{name}」")
+        return {"ok": True, "name": name}
+
+    async def delete_character(self, name: str) -> dict:
+        if self.store is None:
+            return {"ok": False, "error": "记录库不可用"}
+        key = f"{CHAR_PREFIX}{str(name or '').strip()}"
+        if len(key) <= len(CHAR_PREFIX):
+            return {"ok": False, "error": "角色名不能为空"}
+        await self.store.delete_meta(key)
+        return {"ok": True}
+
+    async def _pick_character(self, args: dict) -> "dict | None":
+        """本轮用哪张角色卡：--char 优先，其次配置的固定角色，最后随机。"""
+        cfg = self._sub("character")
+        want = str((args or {}).get("char") or "").strip()
+        mode = str(cfg.get("mode") or "off").strip().lower()
+        if not want and mode == "fixed":
+            want = str(cfg.get("name") or "").strip()
+        cards = await self.list_characters()
+        if not cards:
+            return None
+        if want:
+            for c in cards:
+                if want == c["name"] or want in (c.get("aliases") or []):
+                    return c
+            self.debug_log("character", f"找不到角色卡「{want}」（按本轮无角色处理）")
+            return None
+        if mode == "random":
+            return _PICK_RANDOM.choice(cards)
+        return None
+
+    async def _ab_variant(self, store) -> "tuple[str, str]":
+        """A/B 提示词变体：返回 (标签, 变体文本)。按 meta 游标轮换，两边样本量接近。"""
+        opts = self._prompt_opts()
+        if not config_coerce.truthy(opts.get("ab_enabled", False), False):
+            return "", ""
+        a = str(opts.get("ab_a") or "").strip()
+        b = str(opts.get("ab_b") or "").strip()
+        if not a or not b:
+            return "", ""
+        try:
+            cur = str(await store.get_meta("ab_cursor", "A") or "A").strip().upper()
+        except Exception:
+            cur = "A"
+        nxt = "B" if cur == "A" else "A"
+        try:
+            await store.set_meta("ab_cursor", nxt)
+        except Exception:
+            pass
+        return (cur if cur in ("A", "B") else "A"), (a if cur == "A" else b)
+
+    # ------------------------------------------------------------------ #
     # 生成管线
     # ------------------------------------------------------------------ #
 
@@ -1392,6 +1583,7 @@ class MoePaintPlugin(Star):
             return {
                 "tpl": tpl, "brief": self._reuse_brief(reuse), "args": {},
                 "reason": reason, "should_advance": False, "new_last": new_last,
+                "character": None, "phase": "", "ab": "", "ab_text": "",
             }
         # 只有真的出完一张、且该轮允许推进时才落游标：失败轮与手动试画
         # （默认）都不占位置，定时计划严格按自己的节奏走。
@@ -1400,6 +1592,8 @@ class MoePaintPlugin(Star):
         args = prompter.parse_draw_args(theme)
         if args.get("error"):
             self.debug_log("generate", f"指令参数有误（该部分已忽略）：{args['error']}")
+        # 时段（时间一致性关掉时返回空串，行为与旧版一致）
+        phase = self.current_phase()
         brief = prompter.draw_brief(
             _PICK_RANDOM,
             disabled_categories=self._disabled_categories(),
@@ -1407,6 +1601,7 @@ class MoePaintPlugin(Star):
             weights=self._category_weights(),
             scope=getattr(tpl, "scope", "both"),
             scopes=self._category_scopes(),
+            phase=phase if self._light_sync() else "",
         )
         if args["theme"]:
             brief["category"] = "自定义"
@@ -1415,9 +1610,16 @@ class MoePaintPlugin(Star):
             brief["style"] = args["style"]
         if args["orientation"]:
             brief["orientation"] = args["orientation"]
+        # 角色卡：--char 优先，其次配置的固定角色，最后随机；名字写进简报让 LLM 画对人
+        char = await self._pick_character(args)
+        if char:
+            brief["character"] = str(char.get("name") or "")
+        # A/B 变体（关掉时为空）
+        ab, ab_text = await self._ab_variant(store)
         return {
             "tpl": tpl, "brief": brief, "args": args, "reason": reason,
             "should_advance": should_advance, "new_last": new_last,
+            "character": char, "phase": phase, "ab": ab, "ab_text": ab_text,
         }
 
     async def _deliver_best(self, best: dict, brief: dict, tpl, event) -> None:
@@ -1508,7 +1710,12 @@ class MoePaintPlugin(Star):
                     }
                     prov_label, llm_ms = "复用", 0.0
                 else:
-                    payload, prov_label, llm_ms = await self._llm_prompt(brief, tpl)
+                    payload, prov_label, llm_ms = await self._llm_prompt(
+                        brief, tpl,
+                        char=plan.get("character"),
+                        ab_text=plan.get("ab_text") or "",
+                        phase=plan.get("phase") or "",
+                    )
                 width = int(reuse.get("width") or 0) if reuse else 0
                 height = int(reuse.get("height") or 0) if reuse else 0
                 if width < 64 or height < 64:
@@ -1534,6 +1741,7 @@ class MoePaintPlugin(Star):
                     rec_id, prompt=payload["prompt"], negative=negative, caption=caption,
                     width=width, height=height, seed=seed,
                     llm_provider=prov_label, llm_latency_ms=round(llm_ms, 1),
+                    ab=str(plan.get("ab") or ""),
                 )
 
                 data = b""

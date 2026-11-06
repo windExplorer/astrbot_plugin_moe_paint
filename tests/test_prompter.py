@@ -4,6 +4,7 @@ uv run --no-project python tests/test_prompter.py（退出码即结论）
 
 import random
 import sys
+from datetime import datetime
 
 from _loader import load
 
@@ -500,6 +501,55 @@ sc3 = prompter.parse_score_payload('评分如下：{"score": 140}')
 check("score_clamped", sc3["score"] == 100, str(sc3))
 check("score_parse_garbage", prompter.parse_score_payload("我觉得不错") is None)
 check("score_parse_no_score", prompter.parse_score_payload('{"issues": []}') is None)
+
+# ---------- v0.7.9：时间一致性（daylight） ----------
+daylight = prompter.daylight
+sr6, ss6 = daylight.sun_hours(6, 35)
+sr12, ss12 = daylight.sun_hours(12, 35)
+check("sun_june_long_day", 4.0 < sr6 < 6.0 and 18.0 < ss6 < 20.0, f"{sr6:.2f}/{ss6:.2f}")
+check("sun_dec_short_day", 6.0 < sr12 < 8.5 and 16.0 < ss12 < 18.5, f"{sr12:.2f}/{ss12:.2f}")
+check("sun_clamped_lat", daylight.sun_hours(6, 999)[1] > 12)  # 纬度夹取后仍能算
+check("phase_deep_night", daylight.phase_of(datetime(2026, 6, 21, 3, 0), 35) == "deep_night")
+check("phase_day", daylight.phase_of(datetime(2026, 6, 21, 12, 0), 35) == "day")
+check("phase_dusk", daylight.phase_of(datetime(2026, 6, 21, 18, 30), 35) == "dusk")
+check("phase_night", daylight.phase_of(datetime(2026, 6, 21, 20, 0), 35) == "night")
+check("phase_dec_day", daylight.phase_of(datetime(2026, 12, 21, 12, 0), 35) == "day")
+lights_night = daylight.filter_lights(prompter.LIGHTS, "deep_night")
+check("lights_filtered", 0 < len(lights_night) < len(prompter.LIGHTS), str(lights_night))
+check("lights_night_sane", all(any(k in w for k in ("月光", "霓虹", "星云", "极光", "烛火"))
+                               for w in lights_night), str(lights_night))
+check("lights_no_phase_keeps_all", daylight.filter_lights(prompter.LIGHTS, "") == prompter.LIGHTS)
+check("rule_deep_night", "夜间光照" in daylight.rule_for_phase("deep_night"), daylight.rule_for_phase("deep_night"))
+check("rule_unknown_empty", daylight.rule_for_phase("nope") == "")
+check("conflict_night_noon", daylight.conflicts("正午的阳光很烈", "deep_night") != [])
+check("conflict_none", daylight.conflicts("月光下的湖面很安静", "deep_night") == [])
+check("conflict_day_midnight", daylight.conflicts("midnight street", "day") != [])
+
+# 简报带时段：光色必须落在夜间池里，并写进简报文本
+b_night = prompter.draw_brief(random.Random(11), phase="deep_night")
+check("brief_phase_key", b_night.get("phase") == "deep_night")
+check("brief_light_in_night_pool", b_night["light"] in lights_night, b_night["light"])
+check("brief_text_phase", "时段=深夜" in prompter.brief_text(b_night), prompter.brief_text(b_night))
+sys_p = prompter.build_system_prompt("danbooru", {}, "both", phase="deep_night")
+check("sys_prompt_time_rule", "时间一致性" in sys_p, sys_p[-300:])
+check("sys_prompt_time_rule_override", "时间一致性" in prompter.build_system_prompt(
+    "danbooru", {"override_danbooru": "自定义提示词"}, "both", phase="night"))
+check("sys_prompt_no_phase", "时间一致性" not in prompter.build_system_prompt("danbooru", {}, "both"))
+
+# ---------- v0.7.9：角色卡 ----------
+card = {"name": "初音未来", "tags": "hatsune miku, twintails, aqua hair",
+        "negative": "wrong character, blonde hair"}
+pc = prompter.apply_character({"prompt": "1girl, stage", "negative": "lowres"}, card, "danbooru")
+check("char_tags_front", pc["prompt"].startswith("hatsune miku, twintails"), pc["prompt"])
+check("char_negative_merged", "wrong character" in pc["negative"], pc["negative"])
+pc_nat = prompter.apply_character({"prompt": "窗边的少女", "negative": ""}, card, "natural")
+check("char_natural_no_tags", pc_nat["prompt"] == "窗边的少女", pc_nat["prompt"])
+check("char_natural_negative", "wrong character" in pc_nat["negative"], pc_nat["negative"])
+check("char_none_noop", prompter.apply_character({"prompt": "a", "negative": ""}, None, "danbooru")["prompt"] == "a")
+
+# --char 开关
+a_char = prompter.parse_draw_args("少女 --char 初音未来")
+check("args_char", a_char["char"] == "初音未来" and a_char["theme"] == "少女", str(a_char))
 
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

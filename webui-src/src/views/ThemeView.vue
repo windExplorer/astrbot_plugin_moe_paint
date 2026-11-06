@@ -3,8 +3,15 @@
 // 不再让用户分别去「停用类别」「类别权重」「词池扩充」三个地方对着同一批名字填文本。
 // 内置题材从 /theme/pool 读取（与后端 prompter.CATEGORIES 同源，不再前端硬编码）。
 import { computed, onMounted, ref } from "vue";
-import { NButton, NInput, NInputNumber, NPopconfirm, NSwitch, NTag, useMessage } from "naive-ui";
-import { apiThemePool, type ThemePoolPayload } from "../api";
+import { NButton, NInput, NInputNumber, NPopconfirm, NSelect, NSwitch, NTag, useMessage } from "naive-ui";
+import {
+  apiCharacterDelete,
+  apiCharacters,
+  apiCharacterSave,
+  apiThemePool,
+  type CharacterCard,
+  type ThemePoolPayload,
+} from "../api";
 import { cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { parseWeights, splitNames, weightDistribution } from "../utils";
 
@@ -72,6 +79,100 @@ const scopesMap = computed<Record<string, string>>(() => {
 });
 
 const builtinNames = computed(() => new Set(pool.value.categories.map((c) => c.name)));
+
+// ---------------- 角色卡（v0.7.9） ----------------
+const cards = ref<CharacterCard[]>([]);
+const cardBusy = ref(false);
+const cardPhase = ref("");
+
+const PHASE_LABEL: Record<string, string> = {
+  dawn: "黎明", morning: "上午", day: "白天", dusk: "黄昏", night: "入夜", deep_night: "深夜",
+};
+
+const charMode = computed({
+  get: () => String(cfgGet("character.mode", "off")),
+  set: (v: string) => cfgSet("character.mode", v),
+});
+const charName = computed({
+  get: () => String(cfgGet("character.name", "")),
+  set: (v: string) => cfgSet("character.name", v),
+});
+const charModeOptions = [
+  { label: "不用角色卡", value: "off" },
+  { label: "每轮随机抽一张", value: "random" },
+  { label: "固定用指定角色", value: "fixed" },
+];
+const charNameOptions = computed(() => [
+  { label: "（未指定）", value: "" },
+  ...cards.value.map((c) => ({ label: c.name, value: c.name })),
+]);
+
+async function loadCards() {
+  try {
+    const d = await apiCharacters();
+    cards.value = d.items || [];
+    cardPhase.value = d.phase || "";
+  } catch (e: any) {
+    message.error(`读取角色卡失败：${e?.message || e}`);
+  }
+}
+
+function addCard() {
+  cards.value.push({ name: "", aliases: [], tags: "", negative: "", note: "" });
+}
+
+function aliasesText(c: CharacterCard): string {
+  return (c.aliases || []).join(",");
+}
+
+function setAliases(c: CharacterCard, v: string) {
+  c.aliases = v.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+}
+
+async function saveCard(c: CharacterCard) {
+  if (!c.name.trim()) {
+    message.warning("先填角色名");
+    return;
+  }
+  cardBusy.value = true;
+  try {
+    await apiCharacterSave({
+      name: c.name.trim(),
+      aliases: c.aliases || [],
+      tags: c.tags || "",
+      negative: c.negative || "",
+      note: c.note || "",
+    });
+    message.success(`角色卡「${c.name.trim()}」已保存`);
+    await loadCards();
+  } catch (e: any) {
+    message.error(`保存失败：${e?.message || e}`);
+  } finally {
+    cardBusy.value = false;
+  }
+}
+
+async function removeCard(c: CharacterCard) {
+  cardBusy.value = true;
+  try {
+    await apiCharacterDelete(c.name);
+    message.success("已删除角色卡");
+    await loadCards();
+  } catch (e: any) {
+    message.error(`删除失败：${e?.message || e}`);
+  } finally {
+    cardBusy.value = false;
+  }
+}
+
+async function saveCharConfig() {
+  const r = await saveFields(["character.mode", "character.name"], "角色卡");
+  if (r.ok) {
+    message.success(`角色卡设置已保存（${r.changed} 项）`);
+  } else {
+    message.error(`保存失败：${r.error}`);
+  }
+}
 
 const rows = computed<CatRow[]>(() => {
   const out: CatRow[] = pool.value.categories.map((c) => ({
@@ -198,7 +299,10 @@ async function save() {
   await reload();
 }
 
-onMounted(reload);
+onMounted(() => {
+  void reload();
+  void loadCards();
+});
 </script>
 
 <template>
@@ -313,6 +417,92 @@ onMounted(reload);
         角色名只作画风标签，人物锚定仍会强制成年化（见「提示词」页），请勿用于生成未成年人不当内容。
       </div>
       <n-input v-model:value="characterNames" type="textarea" :rows="5" size="small" class="mp-mono" />
+    </div>
+
+    <!-- 角色卡 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">角色卡（同一角色跨图一致）</div>
+        <div class="mp-row">
+          <n-tag v-if="cardPhase" size="small" :bordered="false">
+            当前时段 {{ PHASE_LABEL[cardPhase] || cardPhase }}
+          </n-tag>
+          <n-button size="small" @click="addCard">新增</n-button>
+          <n-button size="small" type="primary" :loading="!!saving['角色卡']" @click="saveCharConfig">
+            保存设置
+          </n-button>
+        </div>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        一张卡 = 一组固定标签（danbooru 风格会前置进提示词）+ 排除词，让同一个人物每次长相一致。
+        自然语言风格不插标签串（会破坏句子），但角色名会写进简报、排除词照样生效。
+        指令里也可以用 <code class="mp-mono">--char 名字</code> 临时指定。
+      </div>
+      <div class="mp-fields" style="margin-bottom: 12px">
+        <label class="mp-field">
+          <span class="label">使用方式</span>
+          <n-select v-model:value="charMode" :options="charModeOptions" size="small" />
+        </label>
+        <label class="mp-field">
+          <span class="label">固定角色</span>
+          <n-select
+            v-model:value="charName"
+            :options="charNameOptions"
+            size="small"
+            :disabled="charMode !== 'fixed'"
+          />
+        </label>
+      </div>
+
+      <div v-if="!cards.length" class="mp-sub" style="margin-bottom: 10px">
+        还没有角色卡，点右上角「新增」建一张。
+      </div>
+      <div v-for="(c, i) in cards" :key="`${c.name}-${i}`" class="char-card">
+        <div class="mp-fields">
+          <label class="mp-field">
+            <span class="label">角色名</span>
+            <n-input v-model:value="c.name" size="small" placeholder="如 初音未来" />
+          </label>
+          <label class="mp-field">
+            <span class="label">别名（逗号分隔）</span>
+            <n-input
+              :value="aliasesText(c)"
+              size="small"
+              placeholder="如 miku, 初音"
+              @update:value="(v: string) => setAliases(c, v)"
+            />
+          </label>
+          <label class="mp-field mp-field--wide">
+            <span class="label">固定标签（danbooru）</span>
+            <n-input
+              v-model:value="c.tags"
+              size="small"
+              placeholder="hatsune miku, twintails, aqua hair"
+            />
+          </label>
+          <label class="mp-field mp-field--wide">
+            <span class="label">排除词</span>
+            <n-input
+              v-model:value="c.negative"
+              size="small"
+              placeholder="wrong character, blonde hair"
+            />
+          </label>
+          <label class="mp-field mp-field--wide">
+            <span class="label">备注</span>
+            <n-input v-model:value="c.note" size="small" placeholder="给自己看的说明（可选）" />
+          </label>
+        </div>
+        <div class="char-actions">
+          <n-button size="tiny" type="primary" :loading="cardBusy" @click="saveCard(c)">保存</n-button>
+          <n-popconfirm @positive-click="removeCard(c)">
+            <template #trigger>
+              <n-button size="tiny" quaternary>删除</n-button>
+            </template>
+            删除角色卡「{{ c.name || "未命名" }}」？已生成的图不受影响。
+          </n-popconfirm>
+        </div>
+      </div>
     </div>
 
     <!-- 高级 -->
@@ -437,5 +627,20 @@ code {
   padding: 1px 5px;
   border-radius: 5px;
   background: var(--mp-panel-soft);
+}
+
+.char-card {
+  padding: 10px 12px 8px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  border: 1px dashed var(--mp-line-strong);
+  background: var(--mp-panel-soft);
+}
+
+.char-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
 }
 </style>
