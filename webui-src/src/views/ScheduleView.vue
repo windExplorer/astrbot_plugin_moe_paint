@@ -275,16 +275,20 @@ onMounted(async () => {
       </div>
 
       <!-- interval -->
+      <!-- 注意：一行里有多个控件时**必须用 div**，不能用 label 包。
+           label 会把点击转发给它关联的第一个表单控件（这里是左边的数字框），
+           于是点「单位」下拉的瞬间焦点被抢走、Naive 的 select 立即收起，
+           表现为「下拉一打开就自动关闭，选不了分钟/天」。 -->
       <div v-if="mode === 'interval'" class="mp-fields block">
-        <label class="mp-field">
+        <div class="mp-field">
           <span class="label">生成间隔</span>
           <div class="inline">
             <n-input-number v-model:value="intervalValue" :min="1" :max="9999" size="small" style="width: 110px" />
             <n-select v-model:value="intervalUnit" :options="unitOptions" size="small" style="width: 92px" />
           </div>
           <span class="mp-sub">约等于「每 {{ minutesHuman(previewMinutes) }}画一张」</span>
-        </label>
-        <label class="mp-field">
+        </div>
+        <div class="mp-field">
           <span class="label">随机浮动</span>
           <div class="inline">
             <n-switch v-model:value="jitterOn" size="small" />
@@ -299,7 +303,7 @@ onMounted(async () => {
             <span class="mp-sub">分钟</span>
           </div>
           <span class="mp-sub">在间隔上随机多加 0~N 分钟；关掉即准点</span>
-        </label>
+        </div>
       </div>
 
       <!-- daily -->

@@ -17,5 +17,7 @@ pages/moe-paint/
 # 临时文件
 cm_tmp.txt
 _tmp_*
+# vite 在构建失败时会残留的配置文件临时副本
+webui-src/vite.config.ts.timestamp-*
 *_local.zip
 .reasonix/
