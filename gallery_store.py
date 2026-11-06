@@ -135,6 +135,11 @@ class Store:
             return int(cur.lastrowid or 0)
 
     async def update_generation(self, rec_id: int, **fields) -> None:
+        # 失败但没给原因时兜底写一句，避免图库里出现「状态=失败、理由空白」的行
+        if str(fields.get("status") or "") == "failed" and not str(
+            fields.get("error") or ""
+        ).strip():
+            fields["error"] = "未知错误（未记录原因）"
         cols, vals = [], []
         for k, v in fields.items():
             if k in _UPDATE_COLS:
@@ -146,6 +151,22 @@ class Store:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(f"UPDATE generations SET {', '.join(cols)} WHERE id=?", vals)
             await db.commit()
+
+    async def fail_stale_running(self, older_than_sec: int = 900) -> int:
+        """把「卡在 running」的旧记录收尾成失败（插件重启/进程退出留下的）。
+
+        没有这一步，图库里会永远挂着「生成中…」且错误原因为空——
+        用户看到的正是「报错理由是空的」。返回受影响行数。
+        """
+        cutoff = int(time.time()) - max(60, int(older_than_sec))
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "UPDATE generations SET status='failed', error=? "
+                "WHERE status='running' AND ts < ?",
+                ("生成被中断（插件重启或进程退出），本轮没有结果", cutoff),
+            )
+            await db.commit()
+            return int(cur.rowcount or 0)
 
     async def get_record(self, rec_id: int) -> "dict | None":
         async with aiosqlite.connect(self.path) as db:

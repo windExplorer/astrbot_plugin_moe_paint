@@ -106,6 +106,28 @@ async def main() -> None:
         check("delete_returns_row", got is not None and got["id"] == rid2)
         check("count_after_delete", await store.count_relpath("2026-11/aaa.png") == 1)
 
+        # v0.7.0：失败但没给理由 → 兜底写一句（图库里不能再出现空白报错）
+        rNoReason = await store.insert_running(ts=1500, day="2026-11-06", reason="t",
+                                               category="c", brief="{}", workflow="w",
+                                               tag_style="danbooru")
+        await store.update_generation(rNoReason, status="failed")
+        rec = await store.get_record(rNoReason)
+        check("failed_reason_fallback", bool(str(rec["error"] or "").strip()), repr(rec["error"]))
+
+        # v0.7.0：陈旧 running 收尾（插件重启留下的「永远生成中」）
+        stale_id = await store.insert_running(ts=100, day="2026-11-06", reason="t",
+                                              category="c", brief="{}", workflow="w",
+                                              tag_style="danbooru")
+        fresh_id = await store.insert_running(ts=int(__import__("time").time()), day="2026-11-06",
+                                              reason="t", category="c", brief="{}",
+                                              workflow="w", tag_style="danbooru")
+        n = await store.fail_stale_running(older_than_sec=900)
+        stale = await store.get_record(stale_id)
+        fresh = await store.get_record(fresh_id)
+        check("stale_running_marked", n >= 1 and stale["status"] == "failed", f"n={n} {stale['status']}")
+        check("stale_running_reason", "中断" in str(stale["error"]), str(stale["error"]))
+        check("fresh_running_kept", fresh["status"] == "running", fresh["status"])
+
         # LRU：三个文件、一个收藏；cap≈1B → 非收藏全删，收藏存活
         gdir2 = root / "gallery2"
         _a1, f1, _s1, _ = gallery_store.archive_image(gdir2, b"file-1", ".png")

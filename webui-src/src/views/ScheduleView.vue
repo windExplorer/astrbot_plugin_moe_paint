@@ -19,6 +19,7 @@ import {
 import { apiControl } from "../api";
 import { cfgBool, cfgGet, cfgLoaded, cfgNum, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { refreshStatus, status } from "../store";
+import { useAutoRefresh } from "../polling";
 import { fmtDue, joinQuiet, minutesHuman, scheduleSummary, splitQuiet, untilText } from "../utils";
 
 const message = useMessage();
@@ -215,6 +216,9 @@ async function togglePause() {
     pauseLoading.value = false;
   }
 }
+
+// 下次生成时间 / 今日张数每 15s 自动刷新（页面不可见时自动跳过）
+useAutoRefresh(() => refreshStatus(), 15000, { immediate: false });
 
 onMounted(async () => {
   await loadConfig();

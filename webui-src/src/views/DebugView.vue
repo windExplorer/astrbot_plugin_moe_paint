@@ -23,6 +23,7 @@ import {
   type LlmPreview,
 } from "../api";
 import { fmtTsFull, fmtDur } from "../utils";
+import { useAutoRefresh } from "../polling";
 
 const message = useMessage();
 
@@ -67,17 +68,26 @@ async function loadEnv() {
   }
 }
 
-async function loadLogs() {
-  logsLoading.value = true;
+async function loadLogs(silent = false) {
+  if (!silent) logsLoading.value = true;
   try {
     const d = await apiDebugLogs(200);
     logs.value = d.rows;
   } catch (e: any) {
-    message.error(`读取日志失败：${e?.message || e}`);
+    if (!silent) message.error(`读取日志失败：${e?.message || e}`);
+    throw e;
   } finally {
-    logsLoading.value = false;
+    if (!silent) logsLoading.value = false;
   }
 }
+
+// 日志自动刷新：3s（内存日志，请求很轻），页面不可见时自动跳过
+const logsAuto = useAutoRefresh(() => loadLogs(true), 3000, { immediate: false });
+
+const logsAutoText = computed(() => {
+  if (!logsAuto.enabled.value) return "已关";
+  return logsAuto.lastAt.value ? "3 秒 · 刚刚更新" : "3 秒";
+});
 
 async function testComfy() {
   comfyLoading.value = true;
@@ -272,7 +282,9 @@ onMounted(async () => {
       <n-empty v-if="!llmRes && !llmLoading" description="点「试跑一次」看看模型写得怎么样" />
       <n-spin :show="llmLoading">
         <div v-if="llmRes" class="llm-result">
-          <div v-if="!llmRes.ok" class="mp-err" style="margin-bottom: 10px">{{ llmRes.error }}</div>
+          <div v-if="!llmRes.ok" class="mp-err" style="margin-bottom: 10px">
+            {{ llmRes.error || "（没有拿到错误详情：先看 AstrBot 控制台日志）" }}
+          </div>
           <div class="mp-row" style="margin-bottom: 10px">
             <n-tag size="small" :bordered="false" :type="llmRes.ok ? 'success' : 'error'">
               {{ llmRes.ok ? "成功" : "失败" }}
@@ -312,13 +324,17 @@ onMounted(async () => {
       <div class="mp-card-head">
         <div class="mp-card-title">事件日志（内存，最新 {{ logs.length }} 条）</div>
         <div class="mp-row">
+          <label class="auto-tag">
+            <n-switch v-model:value="logsAuto.enabled.value" size="small" />
+            <span class="mp-sub">自动刷新 · {{ logsAutoText }}</span>
+          </label>
           <n-select
             v-model:value="kindFilter"
             :options="[{ label: '全部类型', value: '' }, ...kinds.map((k) => ({ label: k, value: k }))]"
             size="small"
             style="width: 130px"
           />
-          <n-button size="small" quaternary :loading="logsLoading" @click="loadLogs">刷新</n-button>
+          <n-button size="small" quaternary :loading="logsLoading" @click="loadLogs(false)">刷新</n-button>
         </div>
       </div>
       <n-empty v-if="!filteredLogs.length" description="还没有事件（出图/试跑/改配置后会出现在这里）" class="mp-empty" />
@@ -338,6 +354,12 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.auto-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .env-grid {

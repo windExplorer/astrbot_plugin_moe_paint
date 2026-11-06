@@ -14,6 +14,8 @@ from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import StarTools
 
+from . import errfmt
+
 PLUGIN_TAG = "[萌萌绘卷]"
 
 
@@ -79,7 +81,7 @@ async def deliver_record(plugin, rec: dict, sessions: "list | None" = None) -> l
             if not ok:
                 err = "未找到匹配的平台实例（检查 UMO 平台 id）"
         except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:200]
+            err = errfmt.truncate(errfmt.format_exc(e), 200)
         results.append({"umo": str(umo), "ok": ok, "ts": int(time.time()), "error": err})
         if ok:
             logger.info(f"{PLUGIN_TAG} 已投递记录 #{rec.get('id')} → {umo}")

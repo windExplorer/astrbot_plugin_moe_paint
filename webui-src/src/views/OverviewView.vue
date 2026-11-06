@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 总览：一眼看清「现在什么状态、今天画了几张、最近画得怎么样」。
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import {
   NButton,
@@ -19,6 +19,7 @@ import {
   type GenRecord,
 } from "../api";
 import { refreshStats, refreshStatus, stats, status, successRate } from "../store";
+import { useAutoRefresh } from "../polling";
 import { fmtDue, fmtTs, parseBrief, scheduleSummary, untilText } from "../utils";
 
 const message = useMessage();
@@ -31,15 +32,14 @@ const loading = ref(false);
 const triggerTheme = ref("");
 const triggerLoading = ref(false);
 const pauseLoading = ref(false);
-let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const pool = computed(() => (status.value?.templates || []).filter((t) => t.enabled && t.ok));
 const badTemplates = computed(() =>
   (status.value?.templates || []).filter((t) => !t.ok || !t.enabled),
 );
 
-async function loadRecent() {
-  loading.value = true;
+async function loadRecent(silent = false) {
+  if (!silent) loading.value = true;
   try {
     const d = await apiRecords({ limit: 8 });
     recent.value = d.rows;
@@ -54,9 +54,10 @@ async function loadRecent() {
       }
     }
   } catch (e: any) {
-    message.error(`加载最近出图失败：${e?.message || e}`);
+    if (!silent) message.error(`加载最近出图失败：${e?.message || e}`);
+    throw e;
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
 }
 
@@ -106,18 +107,18 @@ async function togglePause() {
   }
 }
 
-onMounted(async () => {
-  await refreshAll();
-  pollTimer = setInterval(async () => {
+// 状态/统计 10s 自动刷新（页面不可见时自动跳过）；有 running 时顺带刷最近出图
+useAutoRefresh(
+  async () => {
     await refreshStatus();
     await refreshStats();
-    if (recent.value.some((r) => r.status === "running")) await loadRecent();
-  }, 30000);
-});
+    if (recent.value.some((r) => r.status === "running")) await loadRecent(true);
+  },
+  10000,
+  { immediate: false },
+);
 
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer);
-});
+onMounted(refreshAll);
 </script>
 
 <template>

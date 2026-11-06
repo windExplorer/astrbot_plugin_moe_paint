@@ -107,14 +107,14 @@
 | 页面 | 内容 |
 | --- | --- |
 | 总览 | 下次生成倒计时、今日 / 累计 / 成功率、最近的图与事件、工作流健康、立即画一张 |
-| 图库 | 状态 / 工作流 / 类别 / 关键词 / 只看收藏筛选；网格缩略图；详情抽屉（全元数据、复制提示词与 seed、收藏、重投、删除） |
+| 图库 | 状态 / 工作流 / 类别 / 关键词 / 只看收藏筛选；网格缩略图；详情抽屉（全元数据、复制提示词与 seed、收藏、重投、删除）；**全屏看大图**（滚轮缩放 / 拖动 / ←→ 切换 / Esc 关闭）；有新增记录时自动刷新 |
 | 调度计划 | 图形化设置：模式二选一（间隔 / 每天时刻）、间隔单位换算、安静时段开关、每日上限开关、保存即重算下次计划 |
 | 投递 | 会话名单（UMO，每行一个）、附带文案开关与模板、发测试消息 |
 | 生成服务 | ComfyUI 地址与等待预算、队列避让阈值、提示词模型与超时、图库容量、管理员通知 |
 | 工作流模板 | 模板清单编辑（名称 / 文件 / 标签风格 / 尺寸预设 / 默认负面词 / 启用）、校验状态、节点覆盖项 |
-| 主题词池 | 停用类别、词池扩充（追加题材 / 新增类别 / 风格·光色·氛围·构图） |
+| 主题词池 | 类别权重（含实时分布）、停用类别、词池扩充（追加题材 / 新增类别 / 风格·光色·氛围·构图） |
 | 关联萌绘 | 萌绘是否安装与版本、服务器列表（只读）、跟随 / 复制地址 / 关闭跟随、连接测试 |
-| 调试与日志 | 运行环境快照、ComfyUI 连通性与队列、LLM 试跑、投递自检、事件日志 |
+| 调试与日志 | 运行环境快照、ComfyUI 连通性与队列、LLM 试跑、投递自检、事件日志（**每 3 秒自动刷新**） |
 
 ### 调度页的三个「开关」约定
 
@@ -246,7 +246,8 @@ ComfyUI 任务 id、耗时、错误原因、投递结果、收藏标记。
 | 现象 | 先看哪里 |
 | --- | --- |
 | 到点没出图 | 「总览」的「当前计划」与「最近事件」；再核对总开关、是否暂停、是否在安静时段、是否达每日上限 |
-| 一直失败 | 「图库」筛选状态=失败看错误；或「调试」页 LLM 试跑看契约是否合规 |
+| 一直失败 | 「图库」筛选状态=失败看错误（v0.7.0 起会写明 ComfyUI 的节点与字段级原因）；或「调试」页 LLM 试跑看契约是否合规 |
+| 失败理由是空的 | 老记录（v0.7.0 之前写的）可能没有原因；插件重启留下的「生成中」会在下次启动时自动收尾成失败并写上「生成被中断」。新记录不会再有空白理由 |
 | ComfyUI 连不上 | 「调试」页 ComfyUI 连通性（含队列）；核对地址是否含 `http://`；跟随萌绘时看萌绘里的服务器是否可用 |
 | 模板校验失败 | 「工作流模板」页红字提示；多为缺 JSON 文件，或异形采样链路需要填节点覆盖 |
 | 上传被拒绝 | 预览区会写具体原因：界面格式（要「导出 (API)」）/ 找不到正向或 latent 节点 / 图生图链路暂不支持 / 节点缺 class_type |
@@ -275,12 +276,15 @@ uv run --no-project --python 3.12 python tests/test_scheduler.py
 uv run --no-project --python 3.12 --with aiosqlite python tests/test_store.py
 uv run --no-project --python 3.12 python tests/test_schema.py
 uv run --no-project --python 3.12 python tests/test_config_coerce.py
+uv run --no-project --python 3.12 python tests/test_errfmt.py
+uv run --no-project --python 3.12 --with aiohttp python tests/test_comfy_errors.py
 ```
 
 `test_schema.py` 复刻了 AstrBot 装载期的 schema 解析规则（每个节点必须有合法 `type`、
 `object` 必须有 `items`）—— 少一个 `type` 就会让插件装不上，且本地只测业务代码发现不了。
 
 模块一览：`main.py`（生命周期 / 调度装配 / 指令 / 萌绘联动）、`scheduler.py`（调度判定与循环）、
-`prompter.py`（抽签 + 契约 + 尺寸）、`workflow_mgr.py`（模板加载 / 注水 / 轮换）、
-`comfy_client.py`（ComfyUI HTTP）、`gallery_store.py`（sqlite + 归档 + LRU）、
-`delivery.py`（投递）、`webui_api.py`（控制台接口）。
+`prompter.py`（抽签 + 契约 + 尺寸）、`workflow_mgr.py`（模板加载 / 注水 / 轮换 / 底模画像）、
+`comfy_client.py`（ComfyUI HTTP + 错误摘要）、`gallery_store.py`（sqlite + 归档 + LRU）、
+`delivery.py`（投递）、`webui_api.py`（控制台接口）、`config_coerce.py`（配置读写纯函数）、
+`errfmt.py`（错误文本兜底）。

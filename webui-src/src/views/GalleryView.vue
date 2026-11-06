@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// 图库：筛选 + 网格 + 详情抽屉。图片一律走 /thumb（data URL），
+// 图库：筛选 + 网格 + 详情抽屉 + 全屏看图。图片一律走 /thumb（data URL），
 // 直链在 sandbox iframe 里不可靠（anima 同款结论）。
+// v0.7.0：自动刷新（有新图静默插入）+ 全屏大图（缩放/拖动/左右切换）。
 import { computed, onMounted, reactive, ref } from "vue";
 import {
   NButton,
@@ -27,7 +28,9 @@ import {
   type GenRecord,
 } from "../api";
 import { status } from "../store";
+import { useAutoRefresh } from "../polling";
 import { briefText, copyText, fmtDur, fmtTs, parseBrief } from "../utils";
+import ImageViewer from "../components/ImageViewer.vue";
 
 const message = useMessage();
 
@@ -50,6 +53,14 @@ const detailShow = ref(false);
 const detailLoading = ref(false);
 const detailBig = ref("");
 const acting = ref(false);
+
+// 全屏看图
+const viewerShow = ref(false);
+const viewerSrc = ref("");
+const viewerLoading = ref(false);
+const viewerIndex = ref(0);
+
+const viewerRecord = computed<GenRecord | null>(() => records.value[viewerIndex.value] || null);
 
 const workflowOptions = computed(() => {
   const list = (status.value?.templates || []).map((t) => ({ label: t.name, value: t.name }));
@@ -88,8 +99,8 @@ async function loadThumbs(rows: GenRecord[]) {
   await Promise.all(workers);
 }
 
-async function loadRecords() {
-  loading.value = true;
+async function loadRecords(silent = false) {
+  if (!silent) loading.value = true;
   try {
     const d = await apiRecords({
       offset: (page.value - 1) * pageSize.value,
@@ -104,10 +115,77 @@ async function loadRecords() {
     records.value = d.rows;
     await loadThumbs(d.rows);
   } catch (e: any) {
-    message.error(`加载记录失败：${e?.message || e}`);
+    // 自动刷新失败不打扰用户（网络抖动很常见），手动刷新才提示
+    if (!silent) message.error(`加载记录失败：${e?.message || e}`);
+    throw e;
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
+}
+
+// ---------------- 自动刷新（有新图静默插入） ----------------
+
+const hasFilters = computed(
+  () =>
+    !!(fStatus.value || fWorkflow.value || fCategory.value || fKeyword.value || fStarred.value),
+);
+
+const auto = useAutoRefresh(
+  async () => {
+    // 仅在「第一页 + 无筛选 + 没打开详情/大图」时自动刷新，避免打断用户
+    if (page.value !== 1 || hasFilters.value || detailShow.value || viewerShow.value) return;
+    const d = await apiRecords({ limit: 1 });
+    const newest = d.rows[0]?.id || 0;
+    if (newest && newest !== (records.value[0]?.id || 0)) {
+      await loadRecords(true);
+    }
+  },
+  8000,
+  { immediate: false },
+);
+
+const autoText = computed(() => {
+  if (!auto.enabled.value) return "自动刷新已关";
+  if (!auto.lastAt.value) return "自动刷新：等待新图";
+  const d = new Date(auto.lastAt.value);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `自动刷新 · ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+});
+
+// ---------------- 全屏看图 ----------------
+
+async function loadViewerImage(idx: number) {
+  const rec = records.value[idx];
+  if (!rec) return;
+  viewerIndex.value = idx;
+  viewerShow.value = true;
+  viewerSrc.value = thumbs[rec.id] || "";
+  if (rec.status !== "success") {
+    viewerSrc.value = "";
+    return;
+  }
+  viewerLoading.value = true;
+  try {
+    const d = await apiThumb(rec.id, 2400);
+    if (viewerIndex.value === idx) viewerSrc.value = d.data_url || viewerSrc.value;
+  } catch {
+    /* 保留缩略图 */
+  } finally {
+    viewerLoading.value = false;
+  }
+}
+
+function openViewer(rec: GenRecord) {
+  const idx = records.value.findIndex((r) => r.id === rec.id);
+  void loadViewerImage(idx >= 0 ? idx : 0);
+}
+
+function viewerPrev() {
+  if (viewerIndex.value > 0) void loadViewerImage(viewerIndex.value - 1);
+}
+
+function viewerNext() {
+  if (viewerIndex.value < records.value.length - 1) void loadViewerImage(viewerIndex.value + 1);
 }
 
 function applyFilters() {
@@ -188,7 +266,7 @@ function copy(text: string, label: string) {
   copyText(text, label, (m) => message.success(m));
 }
 
-onMounted(loadRecords);
+onMounted(() => void loadRecords());
 </script>
 
 <template>
@@ -212,8 +290,12 @@ onMounted(loadRecords);
           <span>只看收藏</span>
         </label>
         <div class="spacer"></div>
+        <span class="auto-tag">
+          <n-switch v-model:value="auto.enabled.value" size="small" />
+          <span class="mp-sub">{{ autoText }}</span>
+        </span>
         <span class="mp-sub">共 {{ total }} 条</span>
-        <n-button size="small" quaternary :loading="loading" @click="loadRecords">刷新</n-button>
+        <n-button size="small" quaternary :loading="loading" @click="loadRecords(false)">刷新</n-button>
       </div>
     </div>
 
@@ -237,6 +319,14 @@ onMounted(loadRecords);
             <div v-else-if="r.status === 'running'" class="ph"><n-spin size="small" /><span>生成中…</span></div>
             <div v-else class="ph ph-fail"><span>失败</span></div>
             <span v-if="r.starred" class="star">★</span>
+            <button
+              v-if="r.status === 'success'"
+              class="zoom"
+              title="查看大图"
+              @click.stop="openViewer(r)"
+            >
+              ⤢
+            </button>
             <div class="hover-veil">
               <span>{{ r.status === "success" ? "查看详情" : "查看失败原因" }}</span>
             </div>
@@ -248,7 +338,9 @@ onMounted(loadRecords);
               <template v-if="r.status === 'success'"> · {{ r.width }}×{{ r.height }}</template>
               · {{ fmtTs(r.ts) }}
             </div>
-            <div v-if="r.status === 'failed'" class="errmsg">{{ r.error }}</div>
+            <div v-if="r.status === 'failed'" class="errmsg">
+              {{ r.error || "（无错误详情：可能是旧版本记录或进程中断）" }}
+            </div>
           </div>
         </div>
       </div>
@@ -261,7 +353,7 @@ onMounted(loadRecords);
         :page-size="pageSize"
         :page-sizes="[24, 48, 96]"
         show-size-picker
-        @update:page="loadRecords"
+        @update:page="() => loadRecords()"
         @update:page-size="onPageSizeChange"
       />
     </div>
@@ -269,7 +361,7 @@ onMounted(loadRecords);
     <n-drawer v-model:show="detailShow" :width="600" placement="right">
       <n-drawer-content :title="detail ? `记录 #${detail.id}` : ''" closable>
         <template v-if="detail">
-          <div class="big-img">
+          <div class="big-img" :class="{ clickable: detail.status === 'success' && detailBig }" @click="openViewer(detail)">
             <n-spin :show="detailLoading">
               <img v-if="detailBig" :src="detailBig" alt="" />
               <n-empty
@@ -277,6 +369,7 @@ onMounted(loadRecords);
                 :description="detail.status === 'failed' ? '生成失败，无图片' : '无图片'"
               />
             </n-spin>
+            <div v-if="detail.status === 'success' && detailBig" class="big-hint">点击看大图</div>
           </div>
 
           <div class="detail-actions">
@@ -296,7 +389,9 @@ onMounted(loadRecords);
           </div>
 
           <n-descriptions v-if="detail.status === 'failed'" :column="1" size="small" bordered>
-            <n-descriptions-item label="错误">{{ detail.error || "-" }}</n-descriptions-item>
+            <n-descriptions-item label="错误">
+              {{ detail.error || "（无错误详情：可能是旧版本记录或进程中断，可看「调试与日志」页）" }}
+            </n-descriptions-item>
           </n-descriptions>
 
           <n-descriptions :column="2" size="small" bordered class="meta-table">
@@ -345,6 +440,22 @@ onMounted(loadRecords);
         </template>
       </n-drawer-content>
     </n-drawer>
+
+    <ImageViewer
+      v-model:show="viewerShow"
+      :src="viewerSrc"
+      :loading="viewerLoading"
+      :title="viewerRecord?.caption || `记录 #${viewerRecord?.id ?? ''}`"
+      :subtitle="
+        viewerRecord
+          ? `${viewerRecord.workflow || '?'} · ${viewerRecord.width || '?'}×${viewerRecord.height || '?'} · ${fmtTs(viewerRecord.ts)}`
+          : ''
+      "
+      :index="viewerIndex"
+      :total="records.length"
+      @prev="viewerPrev"
+      @next="viewerNext"
+    />
   </div>
 </template>
 
@@ -368,6 +479,33 @@ onMounted(loadRecords);
 
 .spacer {
   flex: 1;
+}
+
+.auto-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zoom {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(24, 20, 38, 0.5);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: zoom-in;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.gcard:hover .zoom {
+  opacity: 1;
 }
 
 .star-switch {
@@ -498,10 +636,30 @@ onMounted(loadRecords);
   margin-top: 6px;
 }
 
+.big-img {
+  position: relative;
+}
+
 .big-img img {
   width: 100%;
   border-radius: 12px;
   display: block;
+}
+
+.big-img.clickable {
+  cursor: zoom-in;
+}
+
+.big-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 3px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(24, 20, 38, 0.55);
+  pointer-events: none;
 }
 
 .detail-actions {

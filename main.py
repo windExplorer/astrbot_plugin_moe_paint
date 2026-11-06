@@ -28,7 +28,10 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.star.filter.command import GreedyStr
 
-from . import comfy_client, delivery, gallery_store, prompter, scheduler, webui_api, workflow_mgr
+from . import (
+    comfy_client, delivery, errfmt, gallery_store, prompter, scheduler,
+    webui_api, workflow_mgr,
+)
 
 PLUGIN_NAME = "astrbot_plugin_moe_paint"
 PLUGIN_TAG = "[萌萌绘卷]"
@@ -51,18 +54,18 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.6.0",
+    "v0.7.0",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         # AstrBot 热更新只重载 main.py，依赖子模块会残留在 sys.modules 里跑旧代码；
         # 这里按依赖序（被依赖者在前）强制重载并重新绑定全局名（box/anima/moe_meme 同款）。
-        global comfy_client, config_coerce, delivery, gallery_store, prompter, scheduler, webui_api, workflow_mgr
+        global comfy_client, config_coerce, delivery, errfmt, gallery_store, prompter, scheduler, webui_api, workflow_mgr
         try:
             for _dep in (
-                "comfy_client", "prompter", "workflow_mgr", "config_coerce", "gallery_store",
-                "delivery", "scheduler", "webui_api",
+                "comfy_client", "prompter", "workflow_mgr", "config_coerce", "errfmt",
+                "gallery_store", "delivery", "scheduler", "webui_api",
             ):
                 try:
                     _mod = importlib.import_module(f"{__package__}.{_dep}")
@@ -71,11 +74,12 @@ class MoePaintPlugin(Star):
                     logger.warning(f"{PLUGIN_TAG} {_dep} 强制重载失败（沿用已加载模块）: {_err}")
             from . import (
                 comfy_client as _cc, config_coerce as _cf, delivery as _dl,
-                gallery_store as _gs, prompter as _pm, scheduler as _sch,
-                webui_api as _wa, workflow_mgr as _wm,
+                errfmt as _ef, gallery_store as _gs, prompter as _pm,
+                scheduler as _sch, webui_api as _wa, workflow_mgr as _wm,
             )
             comfy_client, prompter, workflow_mgr = _cc, _pm, _wm
-            config_coerce, gallery_store, delivery, scheduler, webui_api = _cf, _gs, _dl, _sch, _wa
+            config_coerce, errfmt, gallery_store = _cf, _ef, _gs
+            delivery, scheduler, webui_api = _dl, _sch, _wa
         except Exception as _reload_err:
             logger.warning(f"{PLUGIN_TAG} 依赖模块重载流程异常（沿用已加载模块）: {_reload_err}")
 
@@ -116,6 +120,11 @@ class MoePaintPlugin(Star):
         try:
             self.store = gallery_store.Store(str(data_dir / "moe_paint.db"))
             await self.store.init()
+            # 上次进程退出时可能留下 status=running 的记录（图库里会永远「生成中」且理由为空）
+            stale = await self.store.fail_stale_running()
+            if stale:
+                logger.info(f"{PLUGIN_TAG} 已把 {stale} 条中断的旧记录收尾为失败（含中断原因）")
+                self.debug_log("store", f"启动清理：{stale} 条中断记录已标记失败")
         except Exception as e:
             self.store = None
             logger.error(f"{PLUGIN_TAG} 记录库初始化失败（图库功能不可用）: {e}")
@@ -515,7 +524,7 @@ class MoePaintPlugin(Star):
         except asyncio.TimeoutError:
             res = {"ok": False, "elapsed_ms": 6000, "error": "探活超时（6s）"}
         except Exception as e:
-            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            res = {"ok": False, "error": errfmt.format_exc(e)}
         res = dict(res or {})
         res["url"] = url
         res["source"] = src
@@ -541,7 +550,7 @@ class MoePaintPlugin(Star):
                     "pending": len((q or {}).get("queue_pending") or []),
                 }
             except Exception as e:
-                out["queue_error"] = f"{type(e).__name__}: {e}"
+                out["queue_error"] = errfmt.format_exc(e)
         finally:
             await self._close_quietly(probe_client)
         self.debug_log("comfy", f"连通性测试 {url} → {'OK ' + str(out.get('elapsed_ms')) + 'ms' if out.get('ok') else 'FAIL ' + str(out.get('error'))}")
@@ -668,7 +677,7 @@ class MoePaintPlugin(Star):
             )
             self.debug_log("llm", f"试跑成功（{label}，{ms / 1000:.1f}s，{width}x{height}）")
         except Exception as e:
-            out["error"] = f"{type(e).__name__}: {e}"[:400]
+            out["error"] = errfmt.truncate(errfmt.format_exc(e), 400)
             self.debug_log("llm", f"试跑失败：{out['error']}")
         out["total_ms"] = round((time.monotonic() - t0) * 1000, 1)
         return out
@@ -682,7 +691,7 @@ class MoePaintPlugin(Star):
         try:
             okd = bool(await StarTools.send_message(umo, MessageChain(chain=[Plain(body)])))
         except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:200]
+            err = errfmt.truncate(errfmt.format_exc(e), 200)
             self.debug_log("delivery", f"测试投递 {umo} 失败：{err}")
             return {"ok": False, "error": err}
         self.debug_log("delivery", f"测试投递 {umo} → {'成功' if okd else '未找到平台实例'}")
@@ -999,7 +1008,7 @@ class MoePaintPlugin(Star):
                     rec = await store.get_record(rec_id)
                     await delivery.deliver_record(self, rec)
             except Exception as e:
-                summary["error"] = f"{type(e).__name__}: {e}"[:300]
+                summary["error"] = errfmt.truncate(errfmt.format_exc(e), 300)
                 try:
                     await store.update_generation(
                         rec_id, status="failed", error=summary["error"],
@@ -1018,7 +1027,7 @@ class MoePaintPlugin(Star):
                 logger.warning(f"{PLUGIN_TAG} 图库淘汰失败: {e}")
         except Exception as e:
             # 走到这里说明连记录行都没建成功——只能日志留痕
-            summary["error"] = f"{type(e).__name__}: {e}"[:300]
+            summary["error"] = errfmt.truncate(errfmt.format_exc(e), 300)
             logger.exception(f"{PLUGIN_TAG} 生成管线异常")
         return summary
 

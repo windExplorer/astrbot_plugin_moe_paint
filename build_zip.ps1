@@ -73,6 +73,7 @@ if ($LASTEXITCODE -ne 0) {
 $includeList = @(
     "main.py",
     "config_coerce.py",  # config read/write pure helpers (dot-path keys; unit-tested)
+"errfmt.py",         # error text fallbacks (never empty reasons; unit-tested)
     "comfy_client.py",   # ComfyUI HTTP client (adapted from anima, AGPL same-source)
     "prompter.py",       # diversity draw + LLM JSON contract
     "workflow_mgr.py",   # workflow templates: load/locate/inject/rotate
