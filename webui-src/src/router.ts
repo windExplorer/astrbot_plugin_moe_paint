@@ -63,6 +63,37 @@ export const menuOptions = [
   },
 ];
 
+// --------------------------------------------------------------------------- //
+// 记住上次停留的页面（v0.7.17）
+//
+// 现象：在「图库」刷新一下又回到「总览」。
+// 原因：AstrBot 的插件页是 iframe，仪表盘重建 iframe 时用的是原始 src，
+// 不带 `#/gallery` —— hash 丢了，路由自然回落到 `/` → `/overview`。
+// 做法：把最后一次真实页面存 localStorage，创建 router **之前**把 hash 补回去
+// （顺序很关键：createWebHashHistory 会读取创建时刻的 location）。
+// --------------------------------------------------------------------------- //
+const LAST_ROUTE_KEY = "moe_paint:last-route";
+const VALID_PATHS = new Set(MENU.map((m) => m.key));
+
+function readLastRoute(): string {
+  try {
+    const saved = localStorage.getItem(LAST_ROUTE_KEY) || "";
+    return VALID_PATHS.has(saved) ? saved : "";
+  } catch {
+    return ""; // 隐私模式 / 禁用 localStorage
+  }
+}
+
+try {
+  const hash = window.location.hash.replace(/^#/, "");
+  const saved = readLastRoute();
+  if ((!hash || hash === "/") && saved) {
+    window.location.hash = saved;
+  }
+} catch {
+  /* 拿不到 location 就按默认走 */
+}
+
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
@@ -79,4 +110,13 @@ export const router = createRouter({
     { path: "/debug", component: DebugView },
     { path: "/:pathMatch(.*)*", redirect: "/overview" },
   ],
+});
+
+router.afterEach((to) => {
+  if (!VALID_PATHS.has(to.path)) return;
+  try {
+    localStorage.setItem(LAST_ROUTE_KEY, to.path);
+  } catch {
+    /* 存不下就退化成「每次都回总览」，不影响其它功能 */
+  }
 });

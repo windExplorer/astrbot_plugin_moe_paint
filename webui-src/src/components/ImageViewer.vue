@@ -23,6 +23,8 @@ const scale = ref(1);
 const tx = ref(0);
 const ty = ref(0);
 const dragging = ref(false);
+const imgEl = ref<HTMLImageElement | null>(null);
+const stageEl = ref<HTMLElement | null>(null);
 let startX = 0;
 let startY = 0;
 let baseX = 0;
@@ -57,27 +59,50 @@ function onWheel(e: WheelEvent): void {
   if (next === 1) {
     tx.value = 0;
     ty.value = 0;
+  } else {
+    clampPan();
   }
+}
+
+/** 限制拖动范围：最多把图拖到舞台外 90%，别让用户把图拖丢。 */
+function clampPan(): void {
+  const stage = stageEl.value;
+  if (!stage) return;
+  const lx = stage.clientWidth * 0.9;
+  const ly = stage.clientHeight * 0.9;
+  tx.value = Math.max(-lx, Math.min(lx, tx.value));
+  ty.value = Math.max(-ly, Math.min(ly, ty.value));
 }
 
 function onPointerDown(e: PointerEvent): void {
   if (!zoomed.value) return;
+  // 关键：<img> 默认 draggable，浏览器会启动原生图片拖拽并吃掉 pointermove，
+  // 表现就是「放大以后拖不动」。模板里已 draggable="false" + dragstart.prevent，
+  // 这里再监听 window 上的 move/up（拖出图片范围也不断），比 setPointerCapture 稳。
   dragging.value = true;
   startX = e.clientX;
   startY = e.clientY;
   baseX = tx.value;
   baseY = ty.value;
-  (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+  e.preventDefault();
 }
 
 function onPointerMove(e: PointerEvent): void {
   if (!dragging.value) return;
   tx.value = baseX + (e.clientX - startX);
   ty.value = baseY + (e.clientY - startY);
+  clampPan();
 }
 
 function onPointerUp(): void {
+  if (!dragging.value) return;
   dragging.value = false;
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  window.removeEventListener("pointercancel", onPointerUp);
 }
 
 function onKey(e: KeyboardEvent): void {
@@ -89,7 +114,10 @@ function onKey(e: KeyboardEvent): void {
 }
 
 onMounted(() => window.addEventListener("keydown", onKey));
-onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKey);
+  onPointerUp();
+});
 </script>
 
 <template>
@@ -107,19 +135,19 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
         </div>
       </div>
 
-      <div class="vstage" @wheel.prevent="onWheel" @dblclick="reset">
+      <div ref="stageEl" class="vstage" @wheel.prevent="onWheel" @dblclick="reset">
         <div v-if="loading" class="vloading">加载大图…</div>
         <img
           v-else-if="src"
+          ref="imgEl"
           :src="src"
           alt=""
           class="vimg"
           :class="{ grab: zoomed, grabbing: dragging }"
           :style="{ transform: `translate(${tx}px, ${ty}px) scale(${scale})` }"
+          draggable="false"
+          @dragstart.prevent
           @pointerdown="onPointerDown"
-          @pointermove="onPointerMove"
-          @pointerup="onPointerUp"
-          @pointercancel="onPointerUp"
         />
         <div v-else class="vloading">没有可显示的图片</div>
       </div>
@@ -235,6 +263,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
   cursor: zoom-in;
   user-select: none;
   touch-action: none;
+  /* 阻止浏览器原生图片拖拽（它会抢占 pointermove，导致放大后拖不动） */
+  -webkit-user-drag: none;
 }
 
 .vimg.grab {

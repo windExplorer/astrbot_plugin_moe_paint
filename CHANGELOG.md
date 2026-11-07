@@ -1,5 +1,39 @@
 # 更新日志
 
+## v0.7.17（大图放大后拖不动；刷新后总回总览）
+
+两个都是前端问题。
+
+### 一、全屏看图放大后无法拖动
+
+原因：`<img>` 默认 `draggable`，按下并移动时浏览器会启动**原生图片拖拽**，
+pointer 事件被它吃掉（还会触发 pointercancel），所以 `pointermove` 根本到不了处理函数。
+另外原来把 `pointermove/pointerup` 绑在图片上，即使没有原生拖拽，指针一离开图片也会断。
+
+修复：
+
+- `draggable="false"` + `@dragstart.prevent` + `-webkit-user-drag: none`；
+- 拖动期间把 `pointermove/pointerup/pointercancel` 挂到 `window` 上，指针跑出图片也不断；
+- 加了拖动范围限制（舞台的 ±90%），避免把图拖丢到看不见的地方；
+- 组件卸载时清理监听。
+
+### 二、刷新页面总是回到总览
+
+原因：AstrBot 的插件页跑在 iframe 里，仪表盘重建 iframe 时用的是**原始 src**，
+不带 `#/gallery` 这段 hash，路由只能回落到 `/` → `/overview`。
+
+修复（`router.ts`）：
+
+- 每次导航把最后一个**真实页面**存进 `localStorage`（`moe_paint:last-route`）；
+- 创建 router **之前**检查 hash：为空或只有 `/` 时补回上次的页面
+  （顺序很关键，`createWebHashHistory` 只读创建时刻的 location）；
+- 只认菜单里存在的路径，脏数据/旧版本残留会被忽略，不会跳进 404；
+- `localStorage` 不可用（隐私模式）时静默降级为原行为。
+
+### 测试
+
+- 9 个自检全 PASS（纯前端）；`build_webui.ps1` 构建通过。
+
 ## v0.7.16（全屏看图只显示了一部分）
 
 用户反馈：图库点「查看大图」时，只看到图片中间一块，上下（或左右）被切掉。
