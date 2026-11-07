@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.17",
+    "v0.7.18",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -861,6 +861,10 @@ class MoePaintPlugin(Star):
                 person_closeup=config_coerce.truthy(popts.get("person_closeup", True), True),
                 animal_cats=set(prompter.split_tag_list(popts.get("animal_categories"))),
                 style_allow_3d=config_coerce.truthy(popts.get("style_allow_3d", False), False),
+                style_none_pct=self._int_of(
+                    self._sub("theme"), "style_none_pct", prompter.DEFAULT_STYLE_NONE_PCT,
+                    lo=0, hi=100,
+                ),
             )
             args = prompter.parse_draw_args(theme)
             if args["theme"]:
@@ -1646,6 +1650,11 @@ class MoePaintPlugin(Star):
             animal_cats=set(prompter.split_tag_list(popts.get("animal_categories"))),
             # v0.7.13：动漫锚定下不抽 3D/CG 类风格（与负向 3d render 自相矛盾）
             style_allow_3d=config_coerce.truthy(popts.get("style_allow_3d", False), False),
+            # v0.7.18：有比例的「不指定画风」，让底模走默认审美
+            style_none_pct=self._int_of(
+                self._sub("theme"), "style_none_pct", prompter.DEFAULT_STYLE_NONE_PCT,
+                lo=0, hi=100,
+            ),
         )
         if args["theme"]:
             brief["category"] = "自定义"

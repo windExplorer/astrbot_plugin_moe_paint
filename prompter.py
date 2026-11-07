@@ -978,7 +978,29 @@ COMPOSITIONS: list[tuple[str, str]] = [
 LIGHTS: list[str] = [
     "黄昏暖光", "月光冷调", "清晨薄雾光", "霓虹夜色", "逆光剪影",
     "丁达尔光束", "极光绿紫", "星云紫蓝", "烛火暖光", "阴天柔光",
+    # v0.7.18：补一批「正常」的日常光。
+    # 原来夜间过滤后只剩 月光/霓虹/极光/星云/烛火 五个，其中四个都是强风格光，
+    # 于是「晚上出图 = 霓虹赛博感」，用户体感就是「霓虹怎么这么多」。
+    "路灯暖光", "窗内暖灯", "台灯暖光", "室内自然光", "阴天漫射光",
 ]
+
+# 光色权重（v0.7.18）：霓虹这类强风格光降权，日常光保持 1.0。
+# 权重只影响「抽到谁」，不影响用户自己往「光色」里追加的词。
+LIGHT_WEIGHTS: dict = {
+    "霓虹夜色": 0.35,
+    "极光绿紫": 0.6,
+    "星云紫蓝": 0.7,
+    "丁达尔光束": 0.8,
+}
+
+# 风格权重（v0.7.18）：「蒸汽波霓虹」同样是霓虹氛围的常见来源，降权
+STYLE_WEIGHTS: dict = {
+    "蒸汽波霓虹": 0.3,
+}
+
+# 本轮「不指定画风」的文案（让模型走底模默认审美，而不是被硬塞一个画风词）
+STYLE_NONE_LABEL = "不指定（按底模默认，不要另加画风词）"
+DEFAULT_STYLE_NONE_PCT = 40
 
 # 镜头层（只给写实线）：写真与肖像差一口气常常就差「什么镜头」。
 # 写成中文短语，让 LLM 自己转成目标语言；danbooru 系会写成 85mm lens / depth of field 类标签。
@@ -1130,6 +1152,7 @@ def draw_brief(
     person_closeup: bool = True,
     animal_cats: "set[str] | None" = None,
     style_allow_3d: bool = False,
+    style_none_pct: int = DEFAULT_STYLE_NONE_PCT,
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -1177,17 +1200,30 @@ def draw_brief(
 
     category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
     subject = rng.choice(cat_pool[category])
-    style = rng.choice(
-        _merge_words(
-            style_pool_for(category, wf_scope, allow_3d=style_allow_3d),
-            extra.get("风格"),
-        )
+    style_pool = _merge_words(
+        style_pool_for(category, wf_scope, allow_3d=style_allow_3d),
+        extra.get("风格"),
     )
+    # v0.7.18：按比例「不指定画风」—— 让底模走自己的默认审美。
+    # 之前每一张都硬塞一个风格词（新海诚式/浮世绘/蒸汽波…），出图同质化且偏浓。
+    try:
+        none_pct = max(0, min(100, int(style_none_pct)))
+    except (TypeError, ValueError):
+        none_pct = DEFAULT_STYLE_NONE_PCT
+    if not style_pool:
+        style = ""
+    elif none_pct and rng.random() * 100 < none_pct:
+        style = ""
+    else:
+        style = weighted_choice(rng, style_pool, STYLE_WEIGHTS)
     # 光色池按时段收窄（v0.7.9）：凌晨三点不该抽到「黄昏暖光」。
     # 用户自己追加的光色词不参与过滤 —— 那是显式意图，不该被时段否决。
     extra_lights = _merge_words([], extra.get("光色"))
     light_pool = daylight.filter_lights(LIGHTS, phase) if phase else list(LIGHTS)
-    light = rng.choice(light_pool + extra_lights) if (light_pool or extra_lights) else "自然光"
+    # v0.7.18：光色也带权重（霓虹 0.35），否则夜间池里它占比过高
+    light = weighted_choice(rng, light_pool + extra_lights, LIGHT_WEIGHTS) if (
+        light_pool or extra_lights
+    ) else "自然光"
     mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
 
     # 主体类型决定构图池（v0.7.10）：人物偏近景，其余仍是十项均匀抽
@@ -1246,8 +1282,10 @@ def brief_text(brief: dict, theme: str = "") -> str:
     """
     subject = theme.strip() or brief.get("subject", "")
     scope = SCOPE_LABEL_ZH[normalize_scope(brief.get("scope"))]
+    # 画风可能为空：这轮就是「不指定画风」，让模型走底模默认审美（v0.7.18）
+    style_txt = str(brief.get("style") or "").strip() or STYLE_NONE_LABEL
     text = (
-        f"类别={brief.get('category', '')}；题材={subject}；风格={brief.get('style', '')}；"
+        f"类别={brief.get('category', '')}；题材={subject}；画风={style_txt}；"
         f"可画类型={scope}；"
         f"构图={brief.get('composition', '')}；光色={brief.get('light', '')}；"
         f"氛围={brief.get('mood', '')}"

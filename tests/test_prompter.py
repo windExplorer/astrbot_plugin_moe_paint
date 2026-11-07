@@ -221,10 +221,11 @@ check("weight_zero_excluded", "自然生态" not in seen, str(sorted(seen)))
 
 only_anime = {k: (1 if k == "动漫少女" else 0) for k in prompter.CATEGORIES}
 only_real = {k: (1 if k == "真人少女" else 0) for k in prompter.CATEGORIES}
-ok_anime = all(prompter.draw_brief(random.Random(s), weights=only_anime)["style"] in prompter.STYLES_ANIME
-               for s in range(60))
-ok_real = all(prompter.draw_brief(random.Random(s), weights=only_real)["style"] in prompter.STYLES_PHOTO
-              for s in range(60))
+# v0.7.18 起默认有 40% 不指定画风，这里必须显式关掉才能断言「抽到的风格属于该池」
+ok_anime = all(prompter.draw_brief(random.Random(s), weights=only_anime, style_none_pct=0)["style"]
+               in prompter.STYLES_ANIME for s in range(60))
+ok_real = all(prompter.draw_brief(random.Random(s), weights=only_real, style_none_pct=0)["style"]
+              in prompter.STYLES_PHOTO for s in range(60))
 check("style_anime_pool", ok_anime)
 check("style_photo_pool", ok_real)
 check("style_pool_fallback_global", prompter.style_pool_for("自定义类别") == prompter.STYLES)
@@ -519,8 +520,10 @@ check("phase_night", daylight.phase_of(datetime(2026, 6, 21, 20, 0), 35) == "nig
 check("phase_dec_day", daylight.phase_of(datetime(2026, 12, 21, 12, 0), 35) == "day")
 lights_night = daylight.filter_lights(prompter.LIGHTS, "deep_night")
 check("lights_filtered", 0 < len(lights_night) < len(prompter.LIGHTS), str(lights_night))
-check("lights_night_sane", all(any(k in w for k in ("月光", "霓虹", "星云", "极光", "烛火"))
-                               for w in lights_night), str(lights_night))
+# v0.7.18：夜间池除强风格光外还保留中性日用光（路灯/窗内/台灯…）
+_NIGHT_OK_WORDS = ("月光", "霓虹", "星云", "极光", "烛火", "路灯", "窗内", "台灯", "漫射", "室内自然光")
+check("lights_night_sane", all(any(k in w for k in _NIGHT_OK_WORDS) for w in lights_night),
+      str(lights_night))
 check("lights_no_phase_keeps_all", daylight.filter_lights(prompter.LIGHTS, "") == prompter.LIGHTS)
 check("rule_deep_night", "夜间光照" in daylight.rule_for_phase("deep_night"), daylight.rule_for_phase("deep_night"))
 check("rule_unknown_empty", daylight.rule_for_phase("nope") == "")
@@ -737,6 +740,33 @@ check("conflicts_scope_3d_off_when_anchor_off",
       "3d" in prompter.reduce_conflicts(
           {"prompt": "1girl, 3d", "negative": ""}, {"light": ""}, "danbooru",
           {"style_anchor_enabled": False}, "anime")["prompt"])
+
+# ---------- v0.7.18：夜间霓虹降权 + 「不指定画风」 ----------
+lights_night = prompter.daylight.filter_lights(prompter.LIGHTS, "deep_night")
+daily = [w for w in prompter.LIGHTS if any(n in w for n in ("路灯", "窗内", "台灯", "漫射", "室内自然光"))]
+check("night_pool_keeps_daily", daily and all(w in lights_night for w in daily), str(lights_night))
+check("night_pool_size", len(lights_night) >= 8, str(len(lights_night)))
+neon_n = sum(1 for s in range(300) if prompter.draw_brief(random.Random(s), phase="deep_night")["light"]
+             == "霓虹夜色")
+check("neon_not_dominant", neon_n / 300 < 0.12, f"{neon_n}/300")
+
+all_none = sum(1 for s in range(300)
+               if not prompter.draw_brief(random.Random(s), style_none_pct=100)["style"])
+check("style_none_all", all_none == 300, str(all_none))
+none_off = sum(1 for s in range(200)
+               if not prompter.draw_brief(random.Random(s), style_none_pct=0)["style"])
+check("style_none_off", none_off == 0, str(none_off))
+mixed = sum(1 for s in range(400)
+            if not prompter.draw_brief(random.Random(s), style_none_pct=40)["style"])
+check("style_none_ratio", 120 <= mixed <= 200, str(mixed))
+b_none = prompter.draw_brief(random.Random(1), style_none_pct=100)
+check("style_none_brief_text", "画风=不指定" in prompter.brief_text(b_none),
+      prompter.brief_text(b_none))
+b_some = prompter.draw_brief(random.Random(1), style_none_pct=0)
+check("style_some_brief_text", "画风=不指定" not in prompter.brief_text(b_some),
+      prompter.brief_text(b_some))
+check("light_weights_sane", prompter.LIGHT_WEIGHTS.get("霓虹夜色", 1) < 0.5,
+      str(prompter.LIGHT_WEIGHTS))
 
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

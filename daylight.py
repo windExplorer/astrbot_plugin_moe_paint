@@ -34,6 +34,11 @@ _LIGHT_KEYS = {
     "dusk": ("黄昏", "逆光", "霓虹", "烛火", "阴天"),
 }
 
+# v0.7.18：中性日用光不受时段限制。
+# 之前夜间池只剩 月光/霓虹/极光/星云/烛火，四个都是强风格光，导致「夜里必霓虹」；
+# 路灯、窗内暖灯、台灯、室内自然光这些放进任何时段都成立，一律保留。
+_LIGHT_NEUTRAL = ("自然光", "窗内", "窗边", "台灯", "路灯", "漫射")
+
 # 与时段「明显矛盾」的写法（只用于出图前的兜底扫描：命中就纠偏一次）。
 _CONFLICT_WORDS = {
     "deep_night": ("正午", "烈日", "阳光明媚", "艳阳", "midday", "noon", "bright daylight",
@@ -98,12 +103,19 @@ def phase_label(phase: str) -> str:
 
 
 def filter_lights(lights, phase: str) -> list:
-    """按时段收窄光照词池；一个都不剩（或时段认不出）就退回原池。"""
+    """按时段收窄光照词池；一个都不剩（或时段认不出）就退回原池。
+
+    中性日用光（路灯 / 窗内 / 台灯 / 室内自然光…）任何时段都保留 —— 否则夜间
+    只剩月/霓虹/极光/星云这类强风格光，出图会「只要是晚上就赛博朋克」。
+    """
     pool = [str(x) for x in (lights or [])]
     keys = _LIGHT_KEYS.get(str(phase or ""))
     if not keys:
         return pool
-    kept = [w for w in pool if any(k in w for k in keys)]
+    kept = [
+        w for w in pool
+        if any(k in w for k in keys) or any(n in w for n in _LIGHT_NEUTRAL)
+    ]
     return kept or pool
 
 

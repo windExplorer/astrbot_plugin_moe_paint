@@ -81,6 +81,7 @@ export const KNOWN_KEYS = new Set<string>([
   "theme.category_weights",
   "theme.category_scopes",
   "theme.character_names",
+  "theme.style_none_pct",
   "delivery.sessions",
   "delivery.caption_on",
   "delivery.caption_template",

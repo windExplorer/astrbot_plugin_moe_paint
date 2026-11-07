@@ -12,7 +12,7 @@ import {
   type CharacterCard,
   type ThemePoolPayload,
 } from "../api";
-import { cfgGet, cfgSet, loadConfig, saveFields, saving } from "../config";
+import { cfgGet, cfgNum, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { parseWeights, splitNames, weightDistribution } from "../utils";
 
 const message = useMessage();
@@ -23,6 +23,7 @@ const SAVE_KEYS = [
   "theme.category_weights",
   "theme.category_scopes",
   "theme.character_names",
+  "theme.style_none_pct",
 ];
 const LAYER_KEYS = ["风格", "光色", "氛围", "构图"];
 const SCOPE_LABEL: Record<string, string> = {
@@ -524,6 +525,17 @@ onMounted(() => {
             :placeholder="k === '构图' ? '如 教堂穹顶仰拍@portrait' : '如 柔光薄雾, 晨曦微蓝'"
             @update:value="(v: string) => setExtra(k, v)"
           />
+        </label>
+        <label class="mp-field">
+          <span class="label">不指定画风的比例（%）</span>
+          <n-input-number
+            :value="cfgNum('theme.style_none_pct', 40)"
+            :min="0" :max="100" :step="5" size="small"
+            @update:value="(v: number | null) => cfgSet('theme.style_none_pct', v ?? 40)"
+          />
+          <span class="mp-sub">
+            每轮有多大比例不抽画风词（让底模走默认审美）。默认 40%，觉得风格太浓/太同质就调高
+          </span>
         </label>
         <label class="mp-field mp-field--wide">
           <span class="label">类别可画类型覆盖（类别=anime|photo|both，逗号分隔）</span>
