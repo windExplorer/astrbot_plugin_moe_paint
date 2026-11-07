@@ -1,5 +1,35 @@
 # 更新日志
 
+## v0.7.16（全屏看图只显示了一部分）
+
+用户反馈：图库点「查看大图」时，只看到图片中间一块，上下（或左右）被切掉。
+
+### 根因
+
+`ImageViewer.vue` 里舞台用的是单行 grid：
+
+```css
+.vstage { display: grid; place-items: center; overflow: hidden; }
+.vimg   { max-width: 100%; max-height: 100%; }
+```
+
+单行 grid 的隐式行高是 `auto`（由内容决定），因此 `max-height: 100%` 解析成
+「无约束」—— 图片按**原始像素**渲染（例如 1216px 高，而可用高度只有 700px），
+再被 `overflow: hidden` 裁掉，表现就是「只显示中间一部分」。
+
+### 修复
+
+- `.vstage` 改为 flex 容器：高度由 `flex: 1` 确定为可用高度，百分比约束才有意义；
+- `.vimg` 显式 `width: auto; height: auto; max-width: 100%; max-height: 100%`，
+  让浏览器按原比例缩到「宽高都不超过舞台」；
+- 顺带加 `cursor: zoom-in`（未放大时）提示可滚轮缩放。
+
+后端无改动（`/thumb` 用的是 `Image.thumbnail`，本来就不裁切，2400 长边足够看清细节）。
+
+### 测试
+
+- 9 个自检全 PASS（纯前端样式改动）；`build_webui.ps1` 构建通过。
+
 ## v0.7.15（负向注入事故：写进 ZeroOut、甚至覆盖正向）
 
 用户反馈：**有的工作流不需要负向；有的工作流把负向填到了正向里**，并给出了一份

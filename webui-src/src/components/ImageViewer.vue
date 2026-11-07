@@ -208,19 +208,31 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 .vstage {
   flex: 1;
   min-height: 0;
-  display: grid;
-  place-items: center;
+  /* 用 flex 而不是 grid：单行 grid 的行高是 auto（由内容决定），
+     `max-height:100%` 在这里解析成「无约束」—— 大图会按原始像素渲染，
+     再被 overflow:hidden 裁掉，表现就是「只显示中间一部分」。
+     flex 容器的高度由 flex:1 确定为可用高度，百分比才能生效。 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   padding: 8px 56px;
 }
 
 .vimg {
+  /* 只写 max-*，让浏览器按原比例缩到「宽高都不超过舞台」 */
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: block;
   object-fit: contain;
   border-radius: 6px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
   transition: transform 0.08s ease-out;
+  cursor: zoom-in;
   user-select: none;
   touch-action: none;
 }
