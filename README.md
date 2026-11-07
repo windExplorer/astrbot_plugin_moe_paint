@@ -183,6 +183,7 @@
 | `prompt.persona_strip_photo` | `true` | 人物锚定剔除 `asian` / `east asian` 这类摄影线标签（只对 danbooru） |
 | `prompt.conflict_cleanup` | `true` | 冲突压缩：多光源/多时段去重、背景互斥、取景互斥，清掉的进负向 |
 | `prompt.soft_color` | `false` | 柔和色彩：加 soft lighting / pastel colors，压 oversaturated / high contrast |
+| `prompt.style_allow_3d` | `false` | 允许动漫锚定下抽 3D / CG 类风格（默认关：与负向 3d render 冲突，会出塑料感怪图） |
 | `debug.save_workflows` | `true` | 保存每轮提交给 ComfyUI 的完整工作流（图库「查看工作流」用） |
 | `debug.keep_workflows` | `200` | 工作流快照保留条数，超出按最旧清理；`0` = 不限 |
 | `schedule.mode` | `interval` | `interval` 按间隔 / `daily` 每天时刻 |
@@ -565,6 +566,30 @@ harsh shadows` 写进负向。
 
 ---
 
+## 七·十三、3D 风格事故：为什么「一点都不二次元」（v0.7.13）
+
+比「七个光」更隐蔽的一类：**风格层抽到了 3D**。
+
+风格池里有「皮克斯式 3D 质感」「游戏 CG 质感」，一旦抽中，LLM 会老老实实写
+`3d, pixar, octane render, cg`；而动漫硬锚定的负向同时压着 `3d render, cgi`。
+正负向自相矛盾，模型只能折中：**3D 的高光与塑料感 + cel shading 的硬边** ——
+脸色发灰、对比过强、塑料感，既不是插画也不是 3D，而且完全不柔和。
+
+修复（两层）：
+
+| 层 | 做法 |
+| --- | --- |
+| 抽签层 | 有硬锚定时过滤风格池：动漫锚定不抽 3D / CG 类（`3d / 皮克斯 / cg / 渲染 / blender / unreal / octane`），写实锚定不抽插画类。`scope=both`（没有锚定）不过滤 |
+| 提示词层 | 兜底剔除：动漫锚定下把正向里的 `3d / pixar / photorealistic / octane render…` 挑出来写进负向；写实锚定下反过来删 `anime / cel shading`。挂在「冲突压缩」里，调试页会显示「压掉 N 个冲突词」 |
+
+想要 3D 二次元（游戏 CG 风）就打开 **「提示词 → 冲突压缩 → 允许 3D / CG 风格」**
+（`prompt.style_allow_3d`），两层限制同时放开。
+
+用户自己往「主题词池 → 高级 → 风格」里加的 3D 词不受抽签层过滤（那是显式意图），
+但提示词层仍会删 —— 所以要画 3D 请用上面的开关。
+
+---
+
 ## 八、提示词工程（为什么不容易「画腻」）
 
 1. **分层抽签**：类别、题材、风格、构图、光色、氛围每层独立随机 → 组成一句「创作简报」。
@@ -631,6 +656,7 @@ harsh shadows` 写进负向。
 | 想要回原来的远景构图 | 关掉 `person_closeup` 即可恢复十项均匀抽；两个都关就完全是旧行为 |
 | 「查看工作流」是灰的 | 三种原因：这条是旧版本生成的记录（当时还没留档）、快照已超过 `debug.keep_workflows` 被清掉、或 `debug.save_workflows` 被关了。新版生成的图都会有 |
 | 颜色太艳 / 太深 / 像赛博朋克 | 先看「调试与日志 → LLM 试跑」：新版本会显示「压掉 N 个冲突词」，鼠标悬停看是哪几个。若还是艳，打开「提示词 → 冲突压缩 → 柔和色彩」（会把 oversaturated / high contrast 写进负向）；再不行就是底模本身的色彩倾向（可换 checkpoint 或在自定义规则里写「低饱和、胶片色调」） |
+| 出图「一点都不二次元」、塑料感 / 3D 味 | v0.7.13 起动漫锚定不再抽 3D / CG 类风格，正向里的 `3d / pixar / photorealistic` 也会被剔除。若你**就是要** 3D 二次元，打开「允许 3D / CG 风格」。另外注意：纯 3D 底模 + `anime style` 标签也是这个味道，属于底模问题 |
 | 图库筛不到某个旧工作流 | v0.7.12 起筛选列表来自全量历史（`stats.by_workflow`），已停用模板会标「（已停用）」；如果切页后暂时没有，点一下刷新即可 |
 | 想看某一轮到底提交了什么 | 图库点开那张图 →「查看工作流」→ 搜 `prompt` / `negative` / `seed` / `steps`。这是**注入后**的真实图，比记录里的字段可信 |
 | A/B 没有对比数据 | 需要同时打开「成图自检」（否则没有分数）；且 A、B 两版都要填、至少各出几张图后才有样本 |

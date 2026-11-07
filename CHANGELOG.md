@@ -1,5 +1,42 @@
 # 更新日志
 
+## v0.7.13（3D 风格事故：风格层与画风锚定互斥）
+
+用户定位到根因：**风格层抽到了 3D 类型**（「皮克斯式 3D 质感」/「游戏 CG 质感」）。
+
+链路：`STYLES_ANIME` 里含 3D/CG 风格 → 抽中后简报写「皮克斯式 3D 质感」→ LLM 写
+`3d, pixar, octane render, cg` → 而动漫硬锚定的负向同时压着 `3d render, cgi`。
+**正负向自相矛盾**，模型只能折中：3D 的高光塑料感 + cel shading 的硬边 → 脸色发灰、
+对比过强、既不插画也不 3D，正是「说不出来哪里不对、一点都不柔和」。
+
+### 修复（两层）
+
+1. **抽签层**（`style_pool_for(..., allow_3d=False)`）：有硬锚定时过滤风格池 ——
+   动漫锚定剔除 `3d / 三维 / c4d / cgi / cg / 渲染 / 皮克斯 / blender / unreal / octane`，
+   写实锚定剔除插画类（`插画 / 赛璐璐 / 厚涂 / 水彩 / 浮世绘 / 漫画 / 动画 / 立绘 / 轻小说`）。
+   `scope=both` 没有硬锚定，不过滤（两种都能画）；过滤后为空时退回原池，绝不抽不出。
+2. **提示词层**（`strip_scope_conflicts`，挂在冲突压缩里）：兜底把与锚定矛盾的词
+   从正向挑出来写进负向 —— 动漫锚定删 `3d / 3d render / cgi / cg / render /
+   octane render / unreal engine / blender / pixar / photorealistic / photograph /
+   realistic / live action`；写实锚定删 `anime / 2d / illustration / cel shading /
+   watercolor / manga…`。仅在「画风硬锚定」开启时生效。
+
+新增开关 `prompt.style_allow_3d`（默认关）：想画 3D 二次元（游戏 CG 风）时打开，
+两层限制同时放开。用户自己在「主题词池 → 高级 → 风格」里加的 3D 词不过抽签层过滤
+（显式意图），但提示词层仍会删 —— 要 3D 请用开关。
+
+### 前端
+
+- 提示词页「提示词冲突压缩」卡新增「允许 3D / CG 风格」开关。
+
+### 测试
+
+- `test_prompter` 增补 16 条：动漫池不含 3D/CG、允许开关后恢复、both 不过滤、
+  50 次抽签不出现 3D 风格、动漫/写实两个方向的剔除集合、allow_3d 只放开 3D 类、
+  `scope=both` 不剔除、锚定关闭时不剔除、冲突压缩里的 3D 词进负向。
+- 旧断言按新语义调整（风格池现在返回过滤后的副本，用集合包含而非 `is`）；
+  `test_schema` 增补 1 个新键；9 个自检全 PASS。
+
 ## v0.7.12（图库筛选修历史工作流；提示词冲突压缩，治「又艳又深像赛博朋克」）
 
 ### 一、图库筛选只能选到启用中的工作流

@@ -37,6 +37,7 @@ const PROMPT_KEYS = [
   "prompt.persona_strip_photo",
   "prompt.conflict_cleanup",
   "prompt.soft_color",
+  "prompt.style_allow_3d",
 ];
 
 /** 画风硬锚定总开关（关掉则退回「可画类型只筛题材」的旧行为）。 */
@@ -389,6 +390,17 @@ onMounted(async () => {
             @update:value="(v: boolean) => set('prompt.persona_strip_photo', v)"
           />
           <span class="mp-sub">去掉 asian / east asian，避免往写实与深肤色拉</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">允许 3D / CG 风格</span>
+          <n-switch
+            :value="cfgBool('prompt.style_allow_3d', false)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.style_allow_3d', v)"
+          />
+          <span class="mp-sub">
+            默认关：动漫锚定下不抽皮克斯 3D / 游戏 CG 风格（会和负向 3d render 打架）
+          </span>
         </label>
       </div>
     </div>

@@ -227,7 +227,7 @@ ok_real = all(prompter.draw_brief(random.Random(s), weights=only_real)["style"] 
               for s in range(60))
 check("style_anime_pool", ok_anime)
 check("style_photo_pool", ok_real)
-check("style_pool_fallback_global", prompter.style_pool_for("自定义类别") is prompter.STYLES)
+check("style_pool_fallback_global", prompter.style_pool_for("自定义类别") == prompter.STYLES)
 
 dist = prompter.category_distribution(["a", "b"], {"a": 3, "b": 1})
 check("distribution_pct", dist[0] == {"name": "a", "weight": 3.0, "pct": 75.0}, str(dist))
@@ -367,10 +367,12 @@ check("sys_anchor_override_off", "画风硬约束" not in prompter.build_system_
     "danbooru", {"override_danbooru": "only mine", "style_anchor_enabled": False}, "anime"))
 
 # 风格池：可画类型优先，风景 / 星空等 both 题材也跟着画风走
-check("style_pool_scope_anime", prompter.style_pool_for("风景场景", "anime") is prompter.STYLES_ANIME)
-check("style_pool_scope_photo", prompter.style_pool_for("宇宙星空", "photo") is prompter.STYLES_PHOTO)
-check("style_pool_scope_both_global", prompter.style_pool_for("风景场景", "both") is prompter.STYLES)
-check("style_pool_bad_scope", prompter.style_pool_for("风景场景", "xxx") is prompter.STYLES)
+check("style_pool_scope_anime",
+      set(prompter.style_pool_for("风景场景", "anime")) <= set(prompter.STYLES_ANIME))
+check("style_pool_scope_photo",
+      set(prompter.style_pool_for("宇宙星空", "photo")) <= set(prompter.STYLES_PHOTO))
+check("style_pool_scope_both_global", prompter.style_pool_for("风景场景", "both") == prompter.STYLES)
+check("style_pool_bad_scope", prompter.style_pool_for("风景场景", "xxx") == prompter.STYLES)
 photo_only = set(prompter.STYLES_PHOTO) - set(prompter.STYLES_ANIME)
 anime_styles = {prompter.draw_brief(random.Random(s), scope="anime")["style"] for s in range(200)}
 check("draw_brief_anime_no_photo_style", not (anime_styles & photo_only), str(anime_styles & photo_only))
@@ -692,6 +694,49 @@ only_person2 = set(prompter.CATEGORIES) - {"动漫少女"}
 media = {prompter.draw_brief(random.Random(s), disabled_categories=only_person2)["medium"]
          for s in range(40)}
 check("medium_closeup_pool", media <= set(prompter.MEDIUM_ANIME_CLOSEUP), str(media))
+
+# ---------- v0.7.13：风格层与画风锚定互斥（3D 风格事故） ----------
+anime_pool = prompter.style_pool_for("动漫少女", "anime")
+check("style_anime_no_3d",
+      not any(any(w in s.lower() for w in ("3d", "cg", "皮克斯")) for s in anime_pool),
+      str(anime_pool))
+check("style_anime_keeps_rest",
+      "赛璐璐动画风" in anime_pool and len(anime_pool) >= 8, str(len(anime_pool)))
+anime_pool_3d = prompter.style_pool_for("动漫少女", "anime", allow_3d=True)
+check("style_anime_allow_3d",
+      any("3d" in s.lower() or "皮克斯" in s for s in anime_pool_3d), str(anime_pool_3d))
+check("style_both_keeps_3d",
+      any("皮克斯" in s for s in prompter.style_pool_for("风景场景", "both")))
+styles = {prompter.draw_brief(random.Random(s), scope="anime")["style"] for s in range(50)}
+check("draw_anime_no_3d_style",
+      not any(any(w in x.lower() for w in ("3d", "cg", "皮克斯")) for x in styles), str(styles))
+
+kept_s, drop_s = prompter.strip_scope_conflicts(
+    ["anime style", "2d", "3d", "pixar", "octane render", "photorealistic", "1girl"], "anime")
+check("strip_scope_anime_drops_realism",
+      drop_s == ["3d", "pixar", "octane render", "photorealistic"], str(drop_s))
+check("strip_scope_anime_keeps_illust",
+      "anime style" in kept_s and "1girl" in kept_s and "2d" in kept_s, str(kept_s))
+kept_p, drop_p = prompter.strip_scope_conflicts(
+    ["photorealistic", "anime", "cel shading", "85mm lens"], "photo")
+check("strip_scope_photo_drops_illust", drop_p == ["anime", "cel shading"], str(drop_p))
+check("strip_scope_photo_keeps_photo", "photorealistic" in kept_p and "85mm lens" in kept_p)
+check("strip_scope_both_noop", prompter.strip_scope_conflicts(["3d", "anime"], "both")[1] == [])
+check("strip_scope_allow_3d",
+      prompter.strip_scope_conflicts(["3d", "photorealistic"], "anime", allow_3d=True)[1]
+      == ["photorealistic"])
+
+p3d = prompter.reduce_conflicts(
+    {"prompt": "1girl, 3d, pixar, octane render, warm light", "negative": "lowres"},
+    {"light": ""}, "danbooru", {}, "anime",
+)
+check("conflicts_scope_3d_dropped",
+      "3d" not in p3d["prompt"] and "pixar" not in p3d["prompt"], p3d["prompt"])
+check("conflicts_scope_3d_negative", "pixar" in p3d["negative"], p3d["negative"])
+check("conflicts_scope_3d_off_when_anchor_off",
+      "3d" in prompter.reduce_conflicts(
+          {"prompt": "1girl, 3d", "negative": ""}, {"light": ""}, "danbooru",
+          {"style_anchor_enabled": False}, "anime")["prompt"])
 
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

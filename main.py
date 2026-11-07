@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.12",
+    "v0.7.13",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -782,8 +782,9 @@ class MoePaintPlugin(Star):
             # 主体收口（v0.7.10）：动物加 animal focus + 反拟人词；人物加细节词
             out = prompter.apply_subject(out, brief, tpl.tag_style, opts)
             # 冲突压缩（v0.7.12）：七个光同时上 / simple background 与街景并存 /
-            # banner 与 close up 打架 —— 按简报做减法，清掉的标签进负向
-            out = prompter.reduce_conflicts(out, brief, tpl.tag_style, opts)
+            # banner 与 close up 打架 —— 按简报做减法，清掉的标签进负向；
+            # v0.7.13：顺带剔除与画风锚定矛盾的词（动漫锚定下的 3d / photorealistic）
+            out = prompter.reduce_conflicts(out, brief, tpl.tag_style, opts, scope=scope)
             out = prompter.apply_soft_color(out, tpl.tag_style, opts)
             out["prompt"] = prompter.apply_quality_prefix(out.get("prompt", ""), quality)
             out = prompter.apply_negative_base(out, tpl.tag_style, opts)
@@ -859,6 +860,7 @@ class MoePaintPlugin(Star):
                 phase=phase if self._light_sync() else "",
                 person_closeup=config_coerce.truthy(popts.get("person_closeup", True), True),
                 animal_cats=set(prompter.split_tag_list(popts.get("animal_categories"))),
+                style_allow_3d=config_coerce.truthy(popts.get("style_allow_3d", False), False),
             )
             args = prompter.parse_draw_args(theme)
             if args["theme"]:
@@ -1620,6 +1622,8 @@ class MoePaintPlugin(Star):
             # v0.7.10：人物偏近景；动物类别可扩（自然生态默认在内）
             person_closeup=config_coerce.truthy(popts.get("person_closeup", True), True),
             animal_cats=set(prompter.split_tag_list(popts.get("animal_categories"))),
+            # v0.7.13：动漫锚定下不抽 3D/CG 类风格（与负向 3d render 自相矛盾）
+            style_allow_3d=config_coerce.truthy(popts.get("style_allow_3d", False), False),
         )
         if args["theme"]:
             brief["category"] = "自定义"

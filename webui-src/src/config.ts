@@ -54,6 +54,7 @@ export const KNOWN_KEYS = new Set<string>([
   "prompt.persona_strip_photo",
   "prompt.conflict_cleanup",
   "prompt.soft_color",
+  "prompt.style_allow_3d",
   "schedule.mode",
   "schedule.interval_minutes",
   "schedule.jitter_minutes",

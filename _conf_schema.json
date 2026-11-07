@@ -206,6 +206,12 @@
         "default": false,
         "hint": "给 danbooru 风格追加 soft lighting / pastel colors / gentle shading，并把 oversaturated、high contrast、harsh shadows 写进负向。觉得出图「太艳、太深、像赛博朋克」时打开它"
       },
+      "style_allow_3d": {
+        "description": "允许 3D / CG 风格",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关：动漫锚定下不会抽「皮克斯式 3D 质感」「游戏 CG 质感」这类风格——它们会让 LLM 写 3d / pixar / cg，而负向正压着 3d render / cgi，模型只能折中成「塑料感 + 硬边」的怪风格。想要 3D 二次元（游戏 CG 风）再打开"
+      },
       "style_anchor_enabled": {
         "description": "启用画风硬锚定",
         "type": "bool",

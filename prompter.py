@@ -503,12 +503,16 @@ def reduce_framing(tags, composition) -> "tuple[list, list]":
 
 
 def reduce_conflicts(
-    payload: dict, brief: dict, tag_style: str = "danbooru", opts: dict | None = None
+    payload: dict, brief: dict, tag_style: str = "danbooru", opts: dict | None = None,
+    scope: str = "both",
 ) -> dict:
-    """把互相打架的标签挑出来塞进 negative（v0.7.12）。
+    """把互相打架的标签挑出来塞进 negative（v0.7.12 / v0.7.13）。
 
     只对 danbooru 风格生效：自然语言里「黄昏的光落在湿漉漉的街上」这类句子不能按
     标签切。清掉的标签会进负向 —— 只删不压制，模型仍可能自己补回来。
+
+    `scope`（anime / photo）决定要不要同时剔除与画风锚定矛盾的词：
+    动漫锚定下删 `3d / pixar / photorealistic`，写实锚定下删 `anime / cel shading`。
     """
     out = dict(payload or {})
     opts = opts or {}
@@ -523,7 +527,12 @@ def reduce_conflicts(
     tags, d_light = reduce_lighting(tags, brief.get("light"))
     tags, d_bg = reduce_background(tags)
     tags, d_frame = reduce_framing(tags, brief.get("composition"))
-    dropped = (d_light + d_bg + d_frame)[:12]
+    d_scope: list[str] = []
+    if opt_bool(opts.get("style_anchor_enabled"), True):
+        tags, d_scope = strip_scope_conflicts(
+            tags, scope, opt_bool(opts.get("style_allow_3d"), False)
+        )
+    dropped = (d_light + d_bg + d_frame + d_scope)[:16]
     out["prompt"] = ", ".join(tags)
     if dropped:
         out["_dropped"] = dropped
@@ -788,23 +797,100 @@ def apply_negative_base(payload: dict, tag_style: str, opts: dict | None = None)
     return out
 
 
-def style_pool_for(category: str, scope: str = "both") -> list:
+# --------------------------------------------------------------------------- #
+# 风格层与画风锚定的互斥（v0.7.13）
+#
+# 事故复盘：anima 底模的出图「说不出来哪里不对、一点都不二次元、不柔和」。
+# 根因是风格层抽到了「皮克斯式 3D 质感」/「游戏 CG 质感」，LLM 于是写出
+# 3d / pixar / render / cg，而动漫硬锚定的负向同时压着 `3d render, cgi`。
+# 正负向自相矛盾，模型只能折中：3D 的高光与塑料感 + cel shading 的硬边，
+# 结果脸色发灰、对比过强、塑料感，既不是插画也不是 3D。
+# 所以：动漫锚定下不抽 3D / CG 类风格，写实锚定下不抽插画类风格。
+# 想要 3D 二次元（如游戏 CG 风）可以打开 style_allow_3d。
+# --------------------------------------------------------------------------- #
+
+_THREE_D_STYLE_WORDS = (
+    "3d", "三维", "c4d", "cgi", "cg", "渲染", "皮克斯", "pixar", "blender",
+    "unreal", "octane", "粘土", "塑料",
+)
+_ILLUST_STYLE_WORDS = (
+    "插画", "赛璐璐", "厚涂", "水彩", "浮世绘", "漫画", "动画", "立绘",
+    "轻小说", "皮克斯", "3d",
+)
+
+# 提示词层面的兜底：动漫锚定下这些正向标签与负向直接打架
+_REALISM_CONFLICT_TAGS = {
+    "3d", "3d render", "3d model", "3d cg", "cgi", "cg", "render", "octane render",
+    "unreal engine", "blender", "pixar", "pixar style", "photorealistic",
+    "photograph", "photo", "realistic", "live action", "real life", "real person",
+}
+_ILLUST_CONFLICT_TAGS = {
+    "anime", "anime style", "2d", "illustration", "cartoon", "cel shading",
+    "drawing", "painting", "watercolor", "sketch", "chibi", "lineart", "manga",
+}
+
+
+def style_pool_for(
+    category: str, scope: str = "both", allow_3d: bool = False
+) -> list:
     """类别 × 工作流可画类型 → 风格池。
 
     v0.7.6：可画类型优先。风景/星空等「两者皆可」的题材不是中性画风，
     只画动漫时它们也得用动漫风格池（此前会抽到「胶片摄影颗粒感」而画成照片）。
+    v0.7.13：再按锚定过滤 —— 动漫锚定不抽 3D/CG 类，写实锚定不抽插画类。
+    只在有硬锚定（scope != both）时过滤：both 没有负向约束，两种都能画。
     """
     sc = normalize_scope(scope)
     if sc == "anime":
-        return STYLES_ANIME
-    if sc == "photo":
-        return STYLES_PHOTO
-    group = CATEGORY_STYLE_GROUP.get(str(category or ""))
-    if group == "anime":
-        return STYLES_ANIME
-    if group == "photo":
-        return STYLES_PHOTO
-    return STYLES
+        base = list(STYLES_ANIME)
+    elif sc == "photo":
+        base = list(STYLES_PHOTO)
+    else:
+        group = CATEGORY_STYLE_GROUP.get(str(category or ""))
+        if group == "anime":
+            base = list(STYLES_ANIME)
+        elif group == "photo":
+            base = list(STYLES_PHOTO)
+        else:
+            base = list(STYLES)
+        return base  # 没有硬锚定，不做互斥过滤
+    out = []
+    for style in base:
+        low = style.lower()
+        if sc == "anime" and any(w in low for w in _THREE_D_STYLE_WORDS):
+            if not allow_3d:
+                continue
+        if sc == "photo" and any(w in low for w in _ILLUST_STYLE_WORDS):
+            continue
+        out.append(style)
+    return out or base  # 过滤空了就退回原池，绝不抽不出风格
+
+
+def strip_scope_conflicts(
+    tags, scope: str, allow_3d: bool = False
+) -> "tuple[list, list]":
+    """兜底：动漫锚定下把正向里的 3d / pixar / photorealistic 这类词挑出来。
+
+    负向已经压着 `3d render, cgi`，正向再写一遍等于让模型二选一；
+    这类标签通常在 LLM 抄简报风格时带进来，删掉最省事。
+    """
+    sc = normalize_scope(scope)
+    if sc == "both":
+        return list(tags), []
+    bad = set(_REALISM_CONFLICT_TAGS if sc == "anime" else _ILLUST_CONFLICT_TAGS)
+    if sc == "anime" and allow_3d:
+        bad = {
+            t for t in bad
+            if not any(w in t for w in ("3d", "cgi", "cg", "render", "pixar", "blender", "unreal", "octane"))
+        }
+    kept: list[str] = []
+    dropped: list[str] = []
+    for tag in tags:
+        if str(tag).strip().lower() in bad:
+            dropped.append(tag)
+            continue
+        kept.append(tag)
+    return kept, dropped
 
 
 def scope_of(category: str, scopes: dict | None = None) -> str:
@@ -1043,6 +1129,7 @@ def draw_brief(
     phase: str = "",
     person_closeup: bool = True,
     animal_cats: "set[str] | None" = None,
+    style_allow_3d: bool = False,
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -1090,7 +1177,12 @@ def draw_brief(
 
     category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
     subject = rng.choice(cat_pool[category])
-    style = rng.choice(_merge_words(style_pool_for(category, wf_scope), extra.get("风格")))
+    style = rng.choice(
+        _merge_words(
+            style_pool_for(category, wf_scope, allow_3d=style_allow_3d),
+            extra.get("风格"),
+        )
+    )
     # 光色池按时段收窄（v0.7.9）：凌晨三点不该抽到「黄昏暖光」。
     # 用户自己追加的光色词不参与过滤 —— 那是显式意图，不该被时段否决。
     extra_lights = _merge_words([], extra.get("光色"))

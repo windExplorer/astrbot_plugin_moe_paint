@@ -119,6 +119,7 @@ def main() -> int:
         ("prompt", "conflict_cleanup"),
         ("prompt", "soft_color"),
         ("prompt", "persona_strip_photo"),
+        ("prompt", "style_allow_3d"),
         ("quality_guard", "enabled"),
         ("quality_guard", "shots"),
         ("refine", "enabled"),
