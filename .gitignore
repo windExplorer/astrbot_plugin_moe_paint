@@ -17,6 +17,8 @@ pages/moe-paint/
 # 临时文件
 cm_tmp.txt
 _tmp_*
+# 排障用的工作流快照 / 报错样例（从图库导出的一次性文件，不入库）
+errors/
 # vite 在构建失败时会残留的配置文件临时副本
 webui-src/vite.config.ts.timestamp-*
 *_local.zip

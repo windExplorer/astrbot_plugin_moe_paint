@@ -1,5 +1,53 @@
 # 更新日志
 
+## v0.7.15（负向注入事故：写进 ZeroOut、甚至覆盖正向）
+
+用户反馈：**有的工作流不需要负向；有的工作流把负向填到了正向里**，并给出了一份
+真实工作流（krea2 / Qwen 系）：
+
+```
+KSampler.positive = ["8", 0]        # 8 = CLIPTextEncode（唯一文本节点）
+KSampler.negative = ["6", 0]        # 6 = ConditioningZeroOut(["8", 0])
+steps=8, cfg=1
+```
+
+### 根因
+
+1. `locate_nodes` 直接拿采样器 `negative` 的引用当文本节点，没穿透
+   `ConditioningZeroOut` 这层包装 → 把节点 6 当负向文本节点；
+2. `inject` 无脑执行 `wf[neg]["inputs"]["text"] = negative` —— 节点 6 没有 `text`
+   输入，等于写了个无效字段；
+3. 更严重：一旦负向引用**指回正向同一个节点**（本工作流里 ZeroOut 的目标就是正向
+   节点 8；模板里 `negative_node` 填错也会这样），负向写在后、正向写在前，
+   **正向被整段负向覆盖** —— 于是负面词出现在正面提示词里，画出来自然一塌糊涂。
+
+### 修复
+
+- 新增 `_resolve_text_node()`：沿 `conditioning` 链穿透
+  `ConditioningZeroOut / SetArea / SetAreaPercentage / SetTimestepRange /
+  Combine / Concat / Average / SetMask / ControlNetApply` 等包装类，找到真正带
+  `text/prompt` 字段的节点；
+- 负向判定「不可用」并**跳过注入**的三种情况：被 `ConditioningZeroOut` 零化、
+  与正向指向同一节点、模板 `negative_node` 覆盖后指回正向节点；
+- `inject` 三重校验：目标存在、不是正向节点、**确实有**该文本字段才写；
+- 不可用不算错误：不再报「找不到负向文本节点」，改成一条软提示
+  「不使用负向：…（已跳过负向注入）」，模板行可见；
+- **不按 CFG 禁用**：模板的采样参数档可能把 CFG 从 1 改回 6，那时负向就该生效，
+  所以只处理「结构上写不进去」的情况。
+
+### 顺带修复：底模误判
+
+`UpscaleModelLoader / VAELoader / CLIPLoader / LoRA / ControlNet` 也带 `model_name`，
+此前会把放大模型（如 `RealESRGAN_x4plus.pth`）当成底模，导致提示词风格与尺寸预设
+跟着错。现在这些加载器会被跳过（找不到再回退），认得真正的 UNET / Checkpoint。
+
+### 测试
+
+- `test_workflow_mgr` 用**用户给的真实工作流结构**做 fixture，增补 12 条：
+  正向解析、负向判定与跳过、节点 6 不再被塞 `text`、正向不被覆盖、
+  同节点保护、包装类（SetArea）穿透、底模不被放大模型抢走、正常工作流负向照常写入。
+- 9 个自检全 PASS。
+
 ## v0.7.14（立即画一张可以选择工作流）
 
 需求：「怎么在 WebUI 中手动选择工作流立即画一张」—— 之前只能按

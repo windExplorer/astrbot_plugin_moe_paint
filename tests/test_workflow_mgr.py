@@ -410,5 +410,73 @@ check("refine_scale_clamped", workflow_mgr.build_refine_workflow(
 check("refine_negative_wired",
       refine["7"]["inputs"]["negative"] == ["6", 0] and refine["6"]["inputs"]["text"] == "n")
 
+# ---------- v0.7.15：负向注入事故（真实 krea2 工作流结构） ----------
+# KSampler.negative = ConditioningZeroOut(正向文本节点)；cfg=1，负向本来就无效。
+krea = {
+    "1": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "RealESRGAN_x4plus.pth"}},
+    "2": {"class_type": "ImageUpscaleWithModel",
+          "inputs": {"upscale_model": ["1", 0], "image": ["7", 0]}},
+    "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0], "filename_prefix": "x"}},
+    "4": {"class_type": "CLIPLoader",
+          "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2"}},
+    "5": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
+    "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["8", 0]}},
+    "7": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["5", 0]}},
+    "8": {"class_type": "CLIPTextEncode", "inputs": {"text": "a girl", "clip": ["4", 0]}},
+    "9": {"class_type": "EmptySD3LatentImage",
+          "inputs": {"width": 832, "height": 1216, "batch_size": 1}},
+    "11": {"class_type": "KSampler", "inputs": {
+        "seed": 1, "steps": 8, "cfg": 1, "sampler_name": "euler_ancestral",
+        "scheduler": "simple", "denoise": 1, "model": ["13", 0],
+        "positive": ["8", 0], "negative": ["6", 0], "latent_image": ["9", 0],
+    }},
+    "12": {"class_type": "UNETLoader",
+           "inputs": {"unet_name": "krea2Anime_v15_3195943.safetensors"}},
+    "13": {"class_type": "ModelSamplingAuraFlow", "inputs": {"shift": 3, "model": ["12", 0]}},
+}
+krea_info = workflow_mgr.analyze(krea)
+check("krea_positive", krea_info["positive"] == "8", str(krea_info["positive"]))
+check("krea_neg_disabled", krea_info["negative_disabled"] and krea_info["negative"] == "",
+      str(krea_info))
+check("krea_neg_note", "ZeroOut" in (krea_info.get("negative_note") or ""), krea_info.get("negative_note"))
+check("krea_no_problem", not krea_info["problems"], str(krea_info["problems"]))
+check("krea_neg_warning", any("不使用负向" in w for w in krea_info["warnings"]), str(krea_info["warnings"]))
+# 底模别被放大模型抢走（这份工作流里 UpscaleModelLoader 也带 model_name）
+check("krea_model_not_upscaler", "krea2Anime" in krea_info["model_file"], krea_info["model_file"])
+krea_out = workflow_mgr.inject(krea, krea_info, "POSITIVE_TEXT", "NEGATIVE_TEXT", 832, 1216, 123)
+check("krea_inject_positive", krea_out["8"]["inputs"]["text"] == "POSITIVE_TEXT",
+      str(krea_out["8"]["inputs"].get("text")))
+check("krea_inject_no_neg_pollution", "text" not in krea_out["6"]["inputs"],
+      str(krea_out["6"]["inputs"]))
+check("krea_seed", krea_out["11"]["inputs"]["seed"] == 123)
+
+# 正负向指向同一节点：绝不能把负向写进正向
+same = {
+    "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": "c.safetensors"}},
+    "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "x", "clip": ["1", 0]}},
+    "3": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512}},
+    "4": {"class_type": "KSampler", "inputs": {
+        "seed": 1, "steps": 20, "cfg": 7, "positive": ["2", 0], "negative": ["2", 0],
+        "latent_image": ["3", 0], "sampler_name": "euler",
+    }},
+}
+same_info = workflow_mgr.locate_nodes(same)
+check("same_node_neg_disabled", same_info["negative_disabled"] and same_info["negative"] == "",
+      str(same_info))
+same_out = workflow_mgr.inject(same, same_info, "POS", "NEG", 512, 512, 1)
+check("same_node_keeps_positive", same_out["2"]["inputs"]["text"] == "POS",
+      same_out["2"]["inputs"]["text"])
+
+# 正向外面套了一层 SetArea：要沿链找到文本节点
+wrap = dict(krea)
+wrap = {k: (dict(v) if isinstance(v, dict) else v) for k, v in krea.items()}
+wrap["14"] = {"class_type": "ConditioningSetArea", "inputs": {"conditioning": ["8", 0]}}
+wrap["11"] = {**wrap["11"], "inputs": {**wrap["11"]["inputs"], "positive": ["14", 0]}}
+wrap_info = workflow_mgr.locate_nodes(wrap)
+check("wrap_positive_resolved", wrap_info["positive"] == "8", str(wrap_info["positive"]))
+
+# 正常工作流（anima_t2i）负向照常写入
+check("normal_neg_written", out["4"]["inputs"]["text"] == "lowres", str(out["4"]["inputs"]))
+
 print("workflow_mgr:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

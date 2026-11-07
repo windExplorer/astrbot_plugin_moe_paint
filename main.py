@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.14",
+    "v0.7.15",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -1771,6 +1771,13 @@ class MoePaintPlugin(Star):
                 negative = payload.get("negative") or tpl.default_negative
                 if extra_negative:
                     negative = f"{negative}, {extra_negative}" if negative else extra_negative
+                # v0.7.15：这类工作流（ZeroOut / CFG=1）本来就不吃负向，
+                # inject 会跳过写入；这里只留一条日志，避免用户以为负向没生效是 bug
+                if tpl.info.get("negative_disabled"):
+                    self.debug_log(
+                        "generate",
+                        f"#{rec_id} 该模板不使用负向（{tpl.info.get('negative_note') or '无'}），已跳过注入",
+                    )
                 caption = payload.get("caption") or f"{brief['category']}·{brief['subject']}"
                 seed = None
                 if reuse and reuse.get("seed") is not None:

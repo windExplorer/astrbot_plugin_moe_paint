@@ -281,6 +281,56 @@ def _probe_field(node: dict, candidates: tuple) -> str:
     return "text"
 
 
+# --------------------------------------------------------------------------- #
+# v0.7.15：负向注入事故
+#
+# 真实案例（krea2 / Qwen 系工作流）：
+#   KSampler.positive = ["8", 0]        # 8 = CLIPTextEncode（唯一的文本节点）
+#   KSampler.negative = ["6", 0]        # 6 = ConditioningZeroOut(["8", 0])
+#   steps=8, cfg=1
+# 这类模型的负向是**故意零化**的（cfg=1 时负向根本不参与采样）。此前我们：
+#   ① 把负向文本往节点 6 塞一个它没有的 `text` 输入（无效，还可能被判非法输入）；
+#   ② 若模板里填过 negative_node 覆盖、或负向引用恰好指回同一个文本节点，
+#      负向就会**覆盖掉刚写进去的正向** —— 结果整段负面词出现在正面里。
+# 现在：沿 conditioning 链认出「零化 / 与正向同一节点 / cfg<=1」，判定负向不可用，
+# 一律不写；只往真有 text/prompt 字段的节点写。
+# --------------------------------------------------------------------------- #
+
+# 这些类只是把 conditioning 转一手，不承载文本
+_COND_WRAPPERS = {
+    "ConditioningZeroOut", "ConditioningSetArea", "ConditioningSetAreaPercentage",
+    "ConditioningSetTimestepRange", "ConditioningCombine", "ConditioningConcat",
+    "ConditioningAverage", "ConditioningSetDefaultAndCombine", "ConditioningSetMask",
+    "ControlNetApply", "ControlNetApplyAdvanced", "FluxGuidance",
+}
+_ZERO_CLASSES = {"ConditioningZeroOut"}
+_TEXT_KEYS = ("text", "prompt", "positive", "negative", "positive_prompt", "negative_prompt", "caption")
+
+
+def _resolve_text_node(wf: dict, nid: str, depth: int = 0) -> "tuple[str, bool]":
+    """沿 conditioning 链找到真正带文本的节点，返回 (节点 id, 是否被零化)。
+
+    只沿单输入的「包装类」往下找（ZeroOut / SetArea / Combine 之类），
+    遇到有 text/prompt 字段的节点就是目标。
+    """
+    if depth > 6 or not nid or nid not in wf:
+        return "", False
+    node = wf[nid] or {}
+    ct = str(node.get("class_type") or "")
+    inputs = node.get("inputs") or {}
+    if any(k in inputs for k in _TEXT_KEYS) and ct not in _COND_WRAPPERS:
+        return str(nid), False
+    for key in ("conditioning", "conditioning_1", "conditioning_2", "conditioning_to",
+                "conditioning_from", "positive", "negative"):
+        target = _ref_target(inputs.get(key))
+        if not target:
+            continue
+        found, _zeroed = _resolve_text_node(wf, target, depth + 1)
+        if found:
+            return found, ct in _ZERO_CLASSES
+    return "", ct in _ZERO_CLASSES
+
+
 @dataclass
 class Template:
     name: str
@@ -351,6 +401,9 @@ def locate_nodes(wf: dict, override: dict | None = None) -> dict:
         "seed_nodes": [],
         "positive_field": "text",
         "negative_field": "text",
+        # v0.7.15：负向不可用（零化 / 与正向同节点 / CFG<=1）时置 True，注入直接跳过
+        "negative_disabled": False,
+        "negative_note": "",
     }
 
     # seed 节点
@@ -374,14 +427,32 @@ def locate_nodes(wf: dict, override: dict | None = None) -> dict:
         _, _sid, snode = samplers[0]
         s_in = snode.get("inputs") or {}
         info["sampler"] = str(_sid)
-        info["positive"] = _ref_target(s_in.get("positive"))
-        info["negative"] = _ref_target(s_in.get("negative"))
+        # 沿 conditioning 链解析：负向常常是 ConditioningZeroOut(正向) 这种包装节点，
+        # 直接取 ref 会把「包装节点」当成文本节点，写进去既无效又可能覆盖正向
+        pos_id, _pos_zero = _resolve_text_node(wf, _ref_target(s_in.get("positive")))
+        neg_id, neg_zero = _resolve_text_node(wf, _ref_target(s_in.get("negative")))
+        info["positive"] = pos_id
+        info["negative"] = neg_id
         info["latent"] = _ref_target(s_in.get("latent_image"))
+        # 注意：CFG<=1 时负向数学上不生效，但模板的采样参数档可能把 CFG 改回 6+，
+        # 所以这里**不**按 CFG 禁用注入（否则参数档一改就发现负向从来没写进去）。
+        # 只处理结构上就写不进去的情况：零化 / 与正向同节点。
+        if neg_zero:
+            info["negative_disabled"] = True
+            info["negative_note"] = "负向被 ConditioningZeroOut 零化（该工作流不使用负向）"
 
     # 显式覆盖优先
     info["positive"] = str(override.get("positive_node") or info["positive"] or "")
     info["negative"] = str(override.get("negative_node") or info["negative"] or "")
     info["latent"] = str(override.get("latent_node") or info["latent"] or "")
+
+    # 覆盖之后再做一次安全检查：负向指回正向节点时，写负向会把正向覆盖掉
+    if info["negative"] and info["positive"] and info["negative"] == info["positive"]:
+        info["negative"] = ""
+        if not info.get("negative_disabled"):
+            # 前面已经识别出更具体的原因（ZeroOut / CFG）时保留它
+            info["negative_note"] = "负向与正向指向同一节点"
+        info["negative_disabled"] = True
 
     # latent 回退：第一个 EmptyLatentImage / 任何带 width+height 输入的节点
     if not info["latent"]:
@@ -409,7 +480,10 @@ def locate_nodes(wf: dict, override: dict | None = None) -> dict:
     problems = []
     if not info["positive"] or info["positive"] not in wf:
         problems.append("找不到正向文本节点（可在模板配置里填 positive_node）")
-    if not info["negative"] or info["negative"] not in wf:
+    # 负向不可用（零化 / 与正向同节点 / CFG<=1）不算问题：这类工作流本来就不吃负向
+    if not info.get("negative_disabled") and (
+        not info["negative"] or info["negative"] not in wf
+    ):
         problems.append("找不到负向文本节点（可在模板配置里填 negative_node）")
     if not info["latent"] or info["latent"] not in wf:
         problems.append("找不到 latent 节点（可在模板配置里填 latent_node）")
@@ -421,6 +495,8 @@ def locate_nodes(wf: dict, override: dict | None = None) -> dict:
 
 _MODEL_INPUT_KEYS = ("unet_name", "ckpt_name", "model_name", "gguf_name")
 _MODEL_CLASS_HINTS = ("loader", "checkpoint", "unet", "gguf", "diffusion")
+# 这些加载器不是底模（放大 / VAE / 文本编码器 / LoRA / 控制网 / 风格模型）
+_AUX_LOADER_HINTS = ("upscale", "vae", "lora", "clip", "controlnet", "style", "ipadapter")
 
 
 def analyze(wf: dict, override: dict | None = None) -> dict:
@@ -428,23 +504,34 @@ def analyze(wf: dict, override: dict | None = None) -> dict:
     info = locate_nodes(wf, override)
 
     # 底模：优先「类名像加载器」的节点，ckpt_name 加分（LoRA 的 lora_name 不在此列）
-    best: tuple[int, str, str, str] | None = None
-    for nid, node in wf.items():
-        inputs = (node or {}).get("inputs") or {}
-        ct = str((node or {}).get("class_type") or "")
-        for key in _MODEL_INPUT_KEYS:
-            v = inputs.get(key)
-            if not (isinstance(v, str) and v.strip()):
+    # v0.7.15：放大模型 / VAE / CLIP / LoRA 也带 model_name，别把 RealESRGAN 当底模 ——
+    # 认错底模会让提示词风格与尺寸预设跟着错（这份 krea2 工作流就被认成了放大模型）
+    def _pick_model(skip_aux: bool):
+        best = None
+        for nid, node in wf.items():
+            inputs = (node or {}).get("inputs") or {}
+            ct = str((node or {}).get("class_type") or "")
+            ct_low = ct.lower()
+            if skip_aux and any(x in ct_low for x in _AUX_LOADER_HINTS):
                 continue
-            score = 2 if any(h in ct.lower() for h in _MODEL_CLASS_HINTS) else 1
-            if key == "ckpt_name":
-                score += 1
-            if best is None or score > best[0]:
-                best = (score, str(nid), ct, v.strip())
-            break
+            for key in _MODEL_INPUT_KEYS:
+                v = inputs.get(key)
+                if not (isinstance(v, str) and v.strip()):
+                    continue
+                score = 2 if any(h in ct_low for h in _MODEL_CLASS_HINTS) else 1
+                if key == "ckpt_name":
+                    score += 1
+                if best is None or score > best[0]:
+                    best = (score, str(nid), ct, v.strip())
+                break
+        return best
+
+    best = _pick_model(True) or _pick_model(False)
     info["model_file"] = best[3] if best else ""
     info["model_class"] = best[2] if best else ""
     info["model_node"] = best[1] if best else ""
+
+
 
     # 保存节点：SaveImageExtended 优先
     save_id, save_ct = "", ""
@@ -492,6 +579,9 @@ def analyze(wf: dict, override: dict | None = None) -> dict:
         warnings.append("没找到保存节点（SaveImage 系列）；ComfyUI 仍会返回输出图，但检索可能不稳")
     if info["model_file"]:
         warnings.append(f"底模：{info['model_file']}（这台服务器上必须存在同名文件）")
+    if info.get("negative_disabled"):
+        # 不是问题，是特性：Qwen/Krea/turbo 这类模型的负向是故意关掉的
+        warnings.append(f"不使用负向：{info.get('negative_note') or '负向不可用'}，已跳过负向注入")
     info["warnings"] = warnings
     return info
 
@@ -832,10 +922,26 @@ def inject(
     """
     wf = copy.deepcopy(wf)
     pos_id, neg_id = info["positive"], info["negative"]
+    pos_field = info.get("positive_field", "text")
     if pos_id in wf:
-        wf[pos_id]["inputs"][info.get("positive_field", "text")] = prompt
-    if neg_id in wf and negative:
-        wf[neg_id]["inputs"][info.get("negative_field", "text")] = negative
+        p_in = wf[pos_id].get("inputs")
+        if isinstance(p_in, dict) and pos_field in p_in:
+            p_in[pos_field] = prompt
+    # 负向：三个条件同时满足才写（v0.7.15）
+    #   ① 目标节点存在且**不是正向节点**（写同一个节点会把正向覆盖掉）
+    #   ② 模板没被判定为「不吃负向」（ZeroOut / CFG<=1）
+    #   ③ 该节点确实有负向字段 —— 往 ConditioningZeroOut 塞 text 是无效输入
+    neg_field = info.get("negative_field", "text")
+    if (
+        negative
+        and neg_id
+        and neg_id in wf
+        and neg_id != pos_id
+        and not info.get("negative_disabled")
+    ):
+        n_in = wf[neg_id].get("inputs")
+        if isinstance(n_in, dict) and neg_field in n_in:
+            n_in[neg_field] = negative
     lat_id = info["latent"]
     if lat_id in wf:
         inputs = wf[lat_id]["inputs"]
