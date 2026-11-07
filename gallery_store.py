@@ -62,7 +62,21 @@ CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS run_workflows (
+    rec_id   INTEGER NOT NULL,
+    kind     TEXT    NOT NULL DEFAULT 'main',
+    ts       INTEGER NOT NULL DEFAULT 0,
+    bytes    INTEGER NOT NULL DEFAULT 0,
+    template TEXT    NOT NULL DEFAULT '',
+    json     TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (rec_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_runwf_ts ON run_workflows(ts);
 """
+
+# 单条工作流快照的上限：正常 SDXL 图 4~60KB，超过 512KB 的极少数巨型工作流不存，
+# 免得一个 ControlNet 全家桶把库撑爆
+_MAX_WORKFLOW_BYTES = 512 * 1024
 
 # 允许 update 的列（白名单，防注入拼列名）
 _UPDATE_COLS = {
@@ -284,14 +298,94 @@ class Store:
             return dict(row) if row else None
 
     async def delete_record(self, rec_id: int) -> "dict | None":
-        """删除记录并返回被删行（调用方负责删图片文件）。"""
+        """删除记录（含工作流快照）并返回被删行（调用方负责删图片文件）。"""
         rec = await self.get_record(rec_id)
         if rec is None:
             return None
         async with aiosqlite.connect(self.path) as db:
             await db.execute("DELETE FROM generations WHERE id=?", (int(rec_id),))
+            await db.execute("DELETE FROM run_workflows WHERE rec_id=?", (int(rec_id),))
             await db.commit()
         return rec
+
+    # ---------------- 运行快照：这一轮真正提交给 ComfyUI 的工作流 ----------------
+
+    async def save_run_workflow(
+        self, rec_id: int, kind: str, workflow, template: str = "", keep: int = 200,
+    ) -> int:
+        """保存提交快照（按「记录 + 类型」覆盖写），返回落库字节数（0 = 未保存）。
+
+        为什么单独一张表：图库列表用的是 `SELECT *`，几百 KB 的 JSON 挂在主表会让
+        每次翻页都白读一遍；独立表只在点「查看工作流」时才查。
+        """
+        text = (
+            workflow if isinstance(workflow, str)
+            else json.dumps(workflow, ensure_ascii=False)
+        )
+        size = len(text.encode("utf-8"))
+        if not text.strip():
+            return 0
+        if size > _MAX_WORKFLOW_BYTES:
+            logger.warning(
+                f"[萌萌绘卷] 工作流快照过大（{size // 1024}KB），跳过记录 #{rec_id}"
+            )
+            return 0
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT INTO run_workflows (rec_id, kind, ts, bytes, template, json) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(rec_id, kind) DO UPDATE SET "
+                    "ts=excluded.ts, bytes=excluded.bytes, "
+                    "template=excluded.template, json=excluded.json",
+                    (
+                        int(rec_id), str(kind or "main"), int(time.time()), size,
+                        str(template or ""), text,
+                    ),
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"[萌萌绘卷] 保存工作流快照失败 #{rec_id}: {e}")
+            return 0
+        if keep and int(keep) > 0:
+            try:
+                await self.prune_run_workflows(int(keep))
+            except Exception as e:
+                logger.debug(f"[萌萌绘卷] 清理旧工作流快照失败（忽略）: {e}")
+        return size
+
+    async def prune_run_workflows(self, keep: int) -> int:
+        """只保留最近 keep 条快照（按时长倒序），返回删除条数。0 = 不限。"""
+        keep = int(keep or 0)
+        if keep <= 0:
+            return 0
+        removed = 0
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT rec_id, kind FROM run_workflows "
+                "ORDER BY ts DESC, rec_id DESC LIMIT -1 OFFSET ?",
+                (keep,),
+            )
+            old = [(int(r[0]), str(r[1])) for r in await cur.fetchall()]
+            for i in range(0, len(old), 200):
+                chunk = old[i : i + 200]
+                marks = " OR ".join("(rec_id=? AND kind=?)" for _ in chunk)
+                vals = [v for pair in chunk for v in pair]
+                await db.execute(f"DELETE FROM run_workflows WHERE {marks}", vals)
+                removed += len(chunk)
+            await db.commit()
+        return removed
+
+    async def get_run_workflows(self, rec_id: int) -> list:
+        """取某条记录的提交快照（main / refine），按类型排序。"""
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT kind, ts, bytes, template, json FROM run_workflows "
+                "WHERE rec_id=? ORDER BY CASE kind WHEN 'main' THEN 0 ELSE 1 END",
+                (int(rec_id),),
+            )
+            return [dict(r) for r in await cur.fetchall()]
 
     async def set_starred(self, rec_id: int, starred: bool) -> None:
         await self.update_generation(rec_id, starred=1 if starred else 0)
@@ -357,11 +451,15 @@ class Store:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                f"SELECT COUNT(*) AS n FROM generations{clause}", vals
+                f"SELECT COUNT(*) AS n FROM generations g{clause}", vals
             )
             total = int((await cur.fetchone())["n"])
+            # has_workflow：图库详情里「查看工作流」按钮是否可用（主键子查询，24 行/页很轻）
             cur = await db.execute(
-                f"SELECT * FROM generations{clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                "SELECT g.*, EXISTS("
+                "SELECT 1 FROM run_workflows w WHERE w.rec_id = g.id"
+                f") AS has_workflow FROM generations g{clause} "
+                "ORDER BY g.id DESC LIMIT ? OFFSET ?",
                 vals + [max(1, min(200, int(limit))), max(0, int(offset))],
             )
             rows = [dict(r) for r in await cur.fetchall()]

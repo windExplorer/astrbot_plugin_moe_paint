@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.10",
+    "v0.7.11",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -1765,6 +1765,8 @@ class MoePaintPlugin(Star):
                         tpl.wf, tpl.info, payload["prompt"], negative, width, height, seed,
                         overrides=getattr(tpl, "params", None),
                     )
+                    # 留档：这一版才是真正提交给 ComfyUI 的图（空图重试会覆盖成最后一版）
+                    await self._save_run_workflow(rec_id, "main", wf, template=tpl.name)
                     client = self._get_client()
                     if client is None:
                         raise RuntimeError("ComfyUI 客户端不可用")
@@ -1809,7 +1811,7 @@ class MoePaintPlugin(Star):
 
                 # 精修 pass（可选，默认关）：失败就用原图，绝不阻断出图
                 data, refine_note = await self._maybe_refine(
-                    data, entry.get("filename", ""), payload["prompt"], negative, seed
+                    data, entry.get("filename", ""), payload["prompt"], negative, seed, rec_id
                 )
                 ext = gallery_store.ext_for(entry["filename"])
                 if refine_note:
@@ -1980,6 +1982,31 @@ class MoePaintPlugin(Star):
             return None, f"质检输出不合契约：{text[:120]}"
         return int(data["score"]), str(data.get("issues") or "")
 
+    def _debug_cfg(self) -> dict:
+        return self._sub("debug")
+
+    async def _save_run_workflow(
+        self, rec_id: int, kind: str, wf: dict, template: str = ""
+    ) -> None:
+        """把这一轮真正提交给 ComfyUI 的工作流存下来（排障用）。
+
+        为什么值得存：图出问题时「提示词看着没问题」是最常见的情况——真正被注入的
+        正负向、尺寸、种子、采样参数都在图里，只有把提交图原样留档才看得出是模型、
+        模板还是提示词的问题。保存失败一律忽略，绝不影响出图。
+        """
+        if self.store is None or not rec_id or not wf:
+            return
+        opts = self._debug_cfg()
+        if not config_coerce.truthy(opts.get("save_workflows", True), True):
+            return
+        try:
+            await self.store.save_run_workflow(
+                int(rec_id), kind, wf, template=template,
+                keep=self._int_of(opts, "keep_workflows", 200, lo=0, hi=100000),
+            )
+        except Exception as e:
+            logger.debug(f"{PLUGIN_TAG} 保存工作流快照失败（忽略）: {errfmt.format_exc(e)}")
+
     def _refine_cfg(self) -> dict:
         return self._sub("refine")
 
@@ -1990,13 +2017,14 @@ class MoePaintPlugin(Star):
         )
 
     async def _maybe_refine(
-        self, data: bytes, filename: str, positive: str, negative: str, seed: int
+        self, data: bytes, filename: str, positive: str, negative: str, seed: int,
+        rec_id: int = 0,
     ) -> "tuple[bytes, str]":
         """放大 + 低 denoise 重绘（可选）。失败一律退回原图，绝不阻断出图。"""
         if not self._refine_enabled() or not data:
             return data, ""
         try:
-            out = await self._run_refine(data, filename, positive, negative, seed)
+            out = await self._run_refine(data, filename, positive, negative, seed, rec_id)
         except Exception as e:
             err = errfmt.truncate(errfmt.format_exc(e), 200)
             logger.warning(f"{PLUGIN_TAG} 精修失败（用原图）: {err}")
@@ -2008,7 +2036,8 @@ class MoePaintPlugin(Star):
         return out, "已精修"
 
     async def _run_refine(
-        self, data: bytes, filename: str, positive: str, negative: str, seed: int
+        self, data: bytes, filename: str, positive: str, negative: str, seed: int,
+        rec_id: int = 0,
     ) -> bytes:
         """上传成品图到 ComfyUI，按内置精修图跑一遍，返回新图字节。"""
         cfg = self._refine_cfg()
@@ -2031,6 +2060,7 @@ class MoePaintPlugin(Star):
             sampler=str(cfg.get("sampler_name") or "euler").strip() or "euler",
             scheduler=str(cfg.get("scheduler") or "normal").strip() or "normal",
         )
+        await self._save_run_workflow(rec_id, "refine", wf, template="内置精修图")
         queued = await client.queue_prompt(wf)
         prompt_id = str(queued.get("prompt_id") or "")
         if not prompt_id:

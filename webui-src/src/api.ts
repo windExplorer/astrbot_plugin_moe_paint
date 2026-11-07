@@ -137,6 +137,8 @@ export interface GenRecord {
   score_reason?: string;
   /** A/B 变体标签（A / B；未开 A/B 时为空） */
   ab?: string;
+  /** 1 = 存有提交给 ComfyUI 的工作流快照（详情里可查看） */
+  has_workflow?: 0 | 1 | number;
   delivered?: DeliveredItem[];
 }
 
@@ -445,6 +447,20 @@ export function apiPromptPresetDraw(name: string) {
 /** 对已有记录跑一次成图自检（用于校准阈值，不改状态）。 */
 export function apiDebugScore(id: number) {
   return apiPost<{ score: number; issues: string }>("/debug/score", { id }, 120000);
+}
+
+/** 这一轮真正提交给 ComfyUI 的工作流快照（main / refine）。 */
+export interface WorkflowDump {
+  kind: string;
+  ts: number;
+  bytes: number;
+  template: string;
+  /** 原始 JSON 文本（API 格式，未经缩进） */
+  json: string;
+}
+
+export function apiRecordWorkflow(id: number) {
+  return apiPost<{ items: WorkflowDump[] }>("/record/workflow", { id }, 30000);
 }
 
 // ---------------------------------------------------------------- 角色卡

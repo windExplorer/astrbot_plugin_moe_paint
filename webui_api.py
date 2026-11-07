@@ -433,6 +433,25 @@ async def h_prompt_preset(plugin) -> dict:
     return ok(res) if res.get("ok") else err(res.get("error") or "操作失败")
 
 
+async def h_record_workflow(plugin) -> dict:
+    """POST {id}：返回这一轮真正提交给 ComfyUI 的完整工作流（main / refine）。
+
+    排障专用：图不对时先看这里 —— 实际注入的正负向文本、尺寸、种子、采样参数都在
+    图里，能区分「提示词写错了」「模板注入错了」还是「模型本身画不出来」。
+    """
+    if plugin.store is None:
+        return err("数据库未就绪")
+    body = await _payload()
+    try:
+        rec_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return err("id 不合法")
+    items = await plugin.store.get_run_workflows(rec_id)
+    if not items:
+        return err("这条记录没有工作流快照（旧记录，或已超过 debug.keep_workflows 保留条数）")
+    return ok({"items": items})
+
+
 async def h_characters(plugin) -> dict:
     """GET：角色卡列表 + 当前模式（off / random / fixed）+ 当前时段。"""
     cfg = plugin._sub("character")
@@ -839,6 +858,7 @@ def register(plugin) -> None:
         ("/record/star", h_star, ["POST"]),
         ("/record/resend", h_resend, ["POST"]),
         ("/record/redraw", h_redraw, ["POST"]),
+        ("/record/workflow", h_record_workflow, ["POST"]),
         ("/prompt/presets", h_prompt_presets, ["GET"]),
         ("/prompt/preset", h_prompt_preset, ["POST"]),
         ("/characters", h_characters, ["GET"]),

@@ -119,6 +119,43 @@ async def main() -> None:
               and ab_map.get("B", {}).get("score_avg") == 70.0, str(ab_map))
         check("stats_score_avg_after", st3["score_count"] == 2, str(st3["score_count"]))
 
+        # v0.7.11：提交给 ComfyUI 的工作流快照
+        wf = {"1": {"class_type": "KSampler", "inputs": {"seed": 42, "steps": 28}}}
+        n = await store.save_run_workflow(rid, "main", wf, template="测试模板", keep=200)
+        check("wf_saved_bytes", n > 0, str(n))
+        rows_wf = await store.get_run_workflows(rid)
+        check("wf_roundtrip",
+              bool(rows_wf) and rows_wf[0]["kind"] == "main"
+              and "KSampler" in rows_wf[0]["json"], str(rows_wf)[:200])
+        check("wf_template", rows_wf[0]["template"] == "测试模板", rows_wf[0]["template"])
+        # 同 (记录, 类型) 覆盖写，只留一份（空图重试会覆盖成最后一版）
+        await store.save_run_workflow(
+            rid, "main", {"1": {"class_type": "KSampler", "inputs": {"seed": 7}}}
+        )
+        rows_wf = await store.get_run_workflows(rid)
+        check("wf_overwrite", len(rows_wf) == 1 and '"seed": 7' in rows_wf[0]["json"], str(rows_wf)[:200])
+        await store.save_run_workflow(rid, "refine", {"9": {"class_type": "SaveImage"}})
+        rows_wf = await store.get_run_workflows(rid)
+        check("wf_two_kinds", [r["kind"] for r in rows_wf] == ["main", "refine"],
+              str([r["kind"] for r in rows_wf]))
+        # 列表带 has_workflow（图库按钮是否可用）
+        listed, _tot = await store.list_records(limit=50)
+        flags = {int(r["id"]): int(r.get("has_workflow") or 0) for r in listed}
+        check("wf_list_flag", flags.get(rid) == 1 and flags.get(rid_ab) == 0, str(flags))
+        # 超过上限按最旧清理
+        for i in range(3):
+            await store.save_run_workflow(900 + i, "main", {"x": i})
+        await store.prune_run_workflows(2)
+        check("wf_prune", await store.get_run_workflows(900) == [])
+        # 删记录连带删快照（用独立记录，别影响后面 count 类断言）
+        rid_wf = await store.insert_running(
+            ts=2200, day="2026-11-06", reason="t2", category="c",
+            brief="{}", workflow="w", tag_style="danbooru",
+        )
+        await store.save_run_workflow(rid_wf, "main", {"1": {"class_type": "KSampler"}})
+        await store.delete_record(rid_wf)
+        check("wf_delete_cascade", await store.get_run_workflows(rid_wf) == [])
+
         # v0.7.8：空图体检（体积兜底一定生效；像素判断要 Pillow）
         check("blank_empty", gallery_store.suspect_blank(b"") != "")
         check("blank_too_small", "过小" in gallery_store.suspect_blank(b"x" * 100))

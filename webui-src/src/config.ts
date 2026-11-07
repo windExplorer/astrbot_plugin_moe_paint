@@ -102,6 +102,8 @@ export const KNOWN_KEYS = new Set<string>([
   "time_sense.guard_retry",
   "character.mode",
   "character.name",
+  "debug.save_workflows",
+  "debug.keep_workflows",
   "admin_notify_umo",
 ]);
 

@@ -6,8 +6,10 @@ import {
   NButton,
   NEmpty,
   NInput,
+  NInputNumber,
   NSelect,
   NSpin,
+  NSwitch,
   NTag,
   useMessage,
 } from "naive-ui";
@@ -22,6 +24,7 @@ import {
   type DebugLogRow,
   type LlmPreview,
 } from "../api";
+import { cfgBool, cfgGet, cfgNum, cfgSet, loadConfig, saveFields, saving } from "../config";
 import { fmtTsFull, fmtDur } from "../utils";
 import { useAutoRefresh } from "../polling";
 
@@ -141,13 +144,67 @@ async function testDelivery() {
   }
 }
 
+/** 工作流留档设置（v0.7.11） */
+async function saveWfCfg() {
+  const r = await saveFields(
+    ["debug.save_workflows", "debug.keep_workflows"],
+    "工作流留档",
+  );
+  if (r.ok) {
+    message.success(`已保存（${r.changed} 项）`);
+  } else {
+    message.error(`保存失败：${r.error}`);
+  }
+}
+
 onMounted(async () => {
+  await loadConfig();
   await Promise.all([loadEnv(), loadLogs()]);
 });
 </script>
 
 <template>
   <div class="page">
+    <!-- 工作流留档 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">工作流留档（排障）</div>
+        <n-button
+          size="small"
+          type="primary"
+          :loading="!!saving['工作流留档']"
+          @click="saveWfCfg"
+        >
+          保存
+        </n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        每轮都会把<b>真正提交给 ComfyUI</b> 的完整工作流存一份。图不对时去图库点开那张图 →
+        「查看工作流」：实际注入的正负向、尺寸、种子、采样参数都在图里，能区分是提示词写错、
+        模板注入错，还是模型本身画不出来。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">保存提交的工作流</span>
+          <n-switch
+            :value="cfgBool('debug.save_workflows', true)"
+            size="small"
+            @update:value="(v: boolean) => cfgSet('debug.save_workflows', v)"
+          />
+          <span class="mp-sub">关掉后不再留档（已有快照保留）</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">保留条数（0 = 不限）</span>
+          <n-input-number
+            :value="cfgNum('debug.keep_workflows', 200)"
+            :min="0" :max="100000" size="small"
+            @update:value="(v: number | null) => cfgSet('debug.keep_workflows', v ?? 200)"
+          />
+          <span class="mp-sub">200 条约 2~10MB；超出按最旧清理</span>
+        </label>
+      </div>
+    </div>
+
     <!-- 环境 -->
     <div class="mp-card">
       <div class="mp-card-head">

@@ -11,6 +11,7 @@ import {
   NDrawerContent,
   NEmpty,
   NInput,
+  NModal,
   NPagination,
   NPopconfirm,
   NSelect,
@@ -26,6 +27,7 @@ import {
   apiPromptPresetDraw,
   apiPromptPresetSave,
   apiPromptPresets,
+  apiRecordWorkflow,
   apiRecords,
   apiRedraw,
   apiResend,
@@ -33,6 +35,7 @@ import {
   apiThumb,
   type GenRecord,
   type PromptPreset,
+  type WorkflowDump,
 } from "../api";
 import { refreshStats, stats, status } from "../store";
 import { useAutoRefresh } from "../polling";
@@ -280,6 +283,74 @@ async function del(rec: GenRecord) {
 
 function copy(text: string, label: string) {
   copyText(text, label, (m) => message.success(m));
+}
+
+// ---------------- 工作流快照（v0.7.11）：排障时看真正提交给 ComfyUI 的图 ----------------
+
+const wfShow = ref(false);
+const wfLoading = ref(false);
+const wfItems = ref<WorkflowDump[]>([]);
+const wfKind = ref("main");
+const wfRecId = ref(0);
+
+const wfKinds = computed(() =>
+  wfItems.value.map((x) => ({
+    label: x.kind === "refine" ? "精修图" : "出图",
+    value: x.kind,
+  })),
+);
+const wfCurrent = computed(
+  () => wfItems.value.find((x) => x.kind === wfKind.value) || wfItems.value[0] || null,
+);
+/** 原始 JSON 是单行（后端 dumps 无缩进），这里重新缩进给人看；解析失败就原样显示。 */
+const wfText = computed(() => {
+  const cur = wfCurrent.value;
+  if (!cur) return "";
+  try {
+    return JSON.stringify(JSON.parse(cur.json), null, 2);
+  } catch {
+    return cur.json;
+  }
+});
+const wfSize = computed(() => {
+  const n = Number(wfCurrent.value?.bytes || 0);
+  return n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
+});
+
+async function openWorkflow(rec: GenRecord) {
+  wfRecId.value = rec.id;
+  wfItems.value = [];
+  wfKind.value = "main";
+  wfShow.value = true;
+  wfLoading.value = true;
+  try {
+    const d = await apiRecordWorkflow(rec.id);
+    wfItems.value = d.items || [];
+    wfKind.value = wfItems.value[0]?.kind || "main";
+  } catch (e: any) {
+    message.error(`读取工作流失败：${e?.message || e}`);
+    wfShow.value = false;
+  } finally {
+    wfLoading.value = false;
+  }
+}
+
+async function copyWorkflow() {
+  if (!wfText.value) return;
+  await copy(wfText.value, "工作流 JSON");
+}
+
+function downloadWorkflow() {
+  const cur = wfCurrent.value;
+  if (!cur) return;
+  const blob = new Blob([wfText.value], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `moe_paint_${wfRecId.value}_${cur.kind}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  message.success("已下载工作流 JSON");
 }
 
 // ---------------- 重画 / 收藏 / 试评分（v0.7.8） ----------------
@@ -553,6 +624,14 @@ onMounted(() => {
             >
               试评分
             </n-button>
+            <n-button
+              size="small"
+              :disabled="!detail.has_workflow"
+              :title="detail.has_workflow ? '查看这一轮真正提交给 ComfyUI 的完整工作流' : '没有快照（旧记录或已超过保留条数）'"
+              @click="openWorkflow(detail)"
+            >
+              查看工作流
+            </n-button>
             <n-button size="small" @click="copy(detail.prompt, '提示词')">复制提示词</n-button>
             <n-popconfirm @positive-click="del(detail)">
               <template #trigger>
@@ -638,6 +717,42 @@ onMounted(() => {
         </template>
       </n-drawer-content>
     </n-drawer>
+
+    <!-- 工作流快照：图不对时先看这里（实际注入的正负向/尺寸/种子/采样参数都在图里） -->
+    <n-modal
+      v-model:show="wfShow"
+      preset="card"
+      :bordered="false"
+      style="width: min(1040px, 94vw)"
+    >
+      <template #header>
+        <div class="wf-head">
+          <span>提交的工作流 · 记录 #{{ wfRecId }}</span>
+          <n-tag v-if="wfCurrent?.template" size="small" :bordered="false">
+            {{ wfCurrent.template }}
+          </n-tag>
+          <span v-if="wfCurrent" class="mp-sub">{{ wfSize }}</span>
+        </div>
+      </template>
+      <n-spin :show="wfLoading">
+        <div class="wf-toolbar">
+          <n-select
+            v-if="wfKinds.length > 1"
+            v-model:value="wfKind"
+            :options="wfKinds"
+            size="small"
+            style="width: 140px"
+          />
+          <n-button size="small" :disabled="!wfText" @click="copyWorkflow">复制 JSON</n-button>
+          <n-button size="small" :disabled="!wfText" @click="downloadWorkflow">下载 .json</n-button>
+          <span class="mp-sub">
+            这是 API 格式的原始图：搜 <code>prompt</code> / <code>seed</code> /
+            <code>steps</code> 可定位注入结果
+          </span>
+        </div>
+        <pre class="wf-json mp-mono">{{ wfText || "（没有快照）" }}</pre>
+      </n-spin>
+    </n-modal>
 
     <ImageViewer
       v-model:show="viewerShow"
@@ -727,6 +842,35 @@ onMounted(() => {
 .score.low {
   background: rgba(217, 96, 95, 0.14);
   color: var(--mp-err);
+}
+
+.wf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.wf-json {
+  max-height: 62vh;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--mp-line);
+  background: var(--mp-panel-soft);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 2;
 }
 
 .auto-tag {

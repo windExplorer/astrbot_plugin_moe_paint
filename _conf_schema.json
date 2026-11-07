@@ -715,6 +715,26 @@
     },
     "default": {}
   },
+  "debug": {
+    "description": "工作流留档（排障）",
+    "type": "object",
+    "hint": "每一轮都会把真正提交给 ComfyUI 的完整工作流存一份，图库详情里可以直接查看/复制。图不对时这是最直接的证据：实际注入的正负向、尺寸、种子、采样参数都在里面",
+    "items": {
+      "save_workflows": {
+        "description": "保存提交的工作流",
+        "type": "bool",
+        "default": true,
+        "hint": "关掉后不再留档（已有快照保留）。单条正常 4~60KB，超过 512KB 的巨型工作流会自动跳过"
+      },
+      "keep_workflows": {
+        "description": "保留条数",
+        "type": "int",
+        "default": 200,
+        "hint": "只保留最近 N 轮的快照，超出按最旧清理（0 = 不限）。200 条约 2~10MB"
+      }
+    },
+    "default": {}
+  },
   "admin_notify_umo": {
     "description": "管理员通知会话",
     "type": "string",

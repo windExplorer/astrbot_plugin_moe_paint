@@ -124,6 +124,8 @@ def main() -> int:
         ("time_sense", "latitude"),
         ("time_sense", "sync_light"),
         ("character", "mode"),
+        ("debug", "save_workflows"),
+        ("debug", "keep_workflows"),
         ("delivery", "sessions"),
         ("gallery", "max_total_mb"),
         ("theme", "category_weights"),
