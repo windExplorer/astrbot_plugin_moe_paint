@@ -530,6 +530,13 @@
         "default": 40,
         "hint": "每轮有多大概率不抽画风词，让底模按自己的默认审美来。0 = 每张都指定画风（旧行为），100 = 从不指定。觉得出图同质化、风格太浓就调高"
       },
+      "brief_mode": {
+        "description": "创作自由度",
+        "type": "string",
+        "options": ["full", "loose", "free"],
+        "default": "full",
+        "hint": "full = 逐层抽签指定题材/画风/构图（最可控）；loose = 只给类别与光色/氛围，题材与构图由 AI 自己构思；free = 只给类别与可画类型，画什么完全由 AI 决定。后两档会把最近画过的题材一并告诉 AI，避免它自己重复"
+      },
       "character_names": {
         "description": "角色名单（可删改）",
         "type": "text",

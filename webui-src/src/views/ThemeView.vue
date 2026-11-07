@@ -24,6 +24,7 @@ const SAVE_KEYS = [
   "theme.category_scopes",
   "theme.character_names",
   "theme.style_none_pct",
+  "theme.brief_mode",
 ];
 const LAYER_KEYS = ["风格", "光色", "氛围", "构图"];
 const SCOPE_LABEL: Record<string, string> = {
@@ -80,6 +81,17 @@ const scopesMap = computed<Record<string, string>>(() => {
 });
 
 const builtinNames = computed(() => new Set(pool.value.categories.map((c) => c.name)));
+
+// ---------------- 创作自由度（v0.7.19） ----------------
+const briefMode = computed({
+  get: () => String(cfgGet("theme.brief_mode", "full")),
+  set: (v: string) => cfgSet("theme.brief_mode", v),
+});
+const briefModeOptions = [
+  { label: "定死（逐层抽签，最可控）", value: "full" },
+  { label: "半自由（只给类别与气氛）", value: "loose" },
+  { label: "自由（AI 自己构思画面）", value: "free" },
+];
 
 // ---------------- 角色卡（v0.7.9） ----------------
 const cards = ref<CharacterCard[]>([]);
@@ -323,6 +335,29 @@ onMounted(() => {
         「可画类型」标签说明该题材会交给哪种工作流：<b>只画动漫</b>只交给动漫底模，
         <b>只画真人</b>只交给写实底模，<b>两者皆可</b>不限。这样动漫底模不会被派去画泳装写真、
         二次元角色也不会被塞给写实底模。工作流那边的「可画类型」在「工作流模板」页设置。
+      </div>
+    </div>
+
+    <!-- 创作自由度 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">创作自由度</div>
+        <n-button size="small" type="primary" :loading="!!saving['主题词池']" @click="save">保存本页</n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        <b>定死</b>：题材/画风/构图/光色全部抽签决定，最可控但重复感强；
+        <b>半自由</b>：只给类别与光色/氛围，画什么、怎么构图交给 AI；
+        <b>自由</b>：只告诉底模「画哪一类」，画面内容完全由 AI 构思。
+        后两档会把最近 6 张的题材一并发给 AI，避免它自己重复。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field mp-field--wide">
+          <span class="label">模式</span>
+          <n-select v-model:value="briefMode" :options="briefModeOptions" size="small" />
+          <span class="mp-sub">
+            切到自由模式后，下面的题材词池不再逐条指定内容，只用来决定「画哪一类」
+          </span>
+        </label>
       </div>
     </div>
 

@@ -136,6 +136,8 @@ def main() -> int:
         ("theme", "disabled_categories"),
         ("theme", "category_scopes"),
         ("theme", "character_names"),
+        ("theme", "style_none_pct"),
+        ("theme", "brief_mode"),
         ("workflow_templates",),
         ("workflow_templates", "items", "subject_scope"),
     ]

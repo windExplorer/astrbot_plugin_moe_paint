@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.18",
+    "v0.7.19",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -755,6 +755,8 @@ class MoePaintPlugin(Star):
         sys_prompt = prompter.build_system_prompt(
             tpl.tag_style, opts, scope, phase=phase,
             subject_kind=str(brief.get("subject_kind") or ""),
+            # v0.7.19：半自由/自由模式下，画面内容由模型自己构思
+            free_brief=str(brief.get("brief_mode") or "full") in ("loose", "free"),
         )
         ab_text = str(ab_text or "").strip()
         if ab_text:
@@ -865,6 +867,8 @@ class MoePaintPlugin(Star):
                     self._sub("theme"), "style_none_pct", prompter.DEFAULT_STYLE_NONE_PCT,
                     lo=0, hi=100,
                 ),
+                brief_mode=self._brief_mode(),
+                recent=await self._recent_subjects(self.store),
             )
             args = prompter.parse_draw_args(theme)
             if args["theme"]:
@@ -1190,6 +1194,10 @@ class MoePaintPlugin(Star):
     # 时间一致性 / 角色卡 / A-B（v0.7.9）
     # ------------------------------------------------------------------ #
 
+    def _brief_mode(self) -> str:
+        """创作自由度：full / loose / free（v0.7.19）。"""
+        return prompter.normalize_brief_mode(self._sub("theme").get("brief_mode"))
+
     def _time_cfg(self) -> dict:
         return self._sub("time_sense")
 
@@ -1300,6 +1308,25 @@ class MoePaintPlugin(Star):
         if mode == "random":
             return _PICK_RANDOM.choice(cards)
         return None
+
+    async def _recent_subjects(self, store, limit: int = 6) -> list:
+        """最近画过的题材，喂给 LLM 让它别自己重复自己（v0.7.19 自由创作模式用）。"""
+        if store is None:
+            return []
+        try:
+            rows, _total = await store.list_records(limit=limit)
+        except Exception:
+            return []
+        out: list[str] = []
+        for row in rows:
+            try:
+                brief = json.loads(row.get("brief") or "{}")
+            except Exception:
+                continue
+            subj = str(brief.get("subject") or "").strip()
+            if subj and subj not in out:
+                out.append(subj)
+        return out
 
     async def _ab_variant(self, store) -> "tuple[str, str]":
         """A/B 提示词变体：返回 (标签, 变体文本)。按 meta 游标轮换，两边样本量接近。"""
@@ -1637,6 +1664,9 @@ class MoePaintPlugin(Star):
         # 时段（时间一致性关掉时返回空串，行为与旧版一致）
         phase = self.current_phase()
         popts = self._prompt_opts()
+        brief_mode = self._brief_mode()
+        # 自由模式才需要「最近画过什么」：full 模式题材本来就是抽签，不重复
+        recent = await self._recent_subjects(store) if brief_mode != "full" else []
         brief = prompter.draw_brief(
             _PICK_RANDOM,
             disabled_categories=self._disabled_categories(),
@@ -1655,6 +1685,9 @@ class MoePaintPlugin(Star):
                 self._sub("theme"), "style_none_pct", prompter.DEFAULT_STYLE_NONE_PCT,
                 lo=0, hi=100,
             ),
+            # v0.7.19：创作自由度（full / loose / free）+ 近期已画题材
+            brief_mode=brief_mode,
+            recent=recent,
         )
         if args["theme"]:
             brief["category"] = "自定义"

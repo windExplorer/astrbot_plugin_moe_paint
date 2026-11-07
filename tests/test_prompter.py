@@ -768,5 +768,59 @@ check("style_some_brief_text", "画风=不指定" not in prompter.brief_text(b_s
 check("light_weights_sane", prompter.LIGHT_WEIGHTS.get("霓虹夜色", 1) < 0.5,
       str(prompter.LIGHT_WEIGHTS))
 
+# ---------- v0.7.19：创作自由度 ----------
+check("brief_mode_normalize", prompter.normalize_brief_mode("LOOSE") == "loose"
+      and prompter.normalize_brief_mode("free") == "free"
+      and prompter.normalize_brief_mode("nope") == "full"
+      and prompter.normalize_brief_mode(None) == "full")
+
+bf = prompter.draw_brief(random.Random(7), brief_mode="full", style_none_pct=0)
+check("brief_full_has_subject", bool(bf["subject"]) and bool(bf["composition"]), str(bf)[:180])
+check("brief_full_mode", bf["brief_mode"] == "full")
+
+bl = prompter.draw_brief(
+    random.Random(7), brief_mode="loose", recent=["窗边读书的少女", "雨夜街角"],
+)
+check("brief_loose_no_subject", bl["subject"] == "" and bl["composition"] == "",
+      str(bl)[:180])
+check("brief_loose_keeps_mood", bool(bl["light"]) and bool(bl["mood"]), str(bl)[:180])
+check("brief_loose_no_lens_medium", not bl["lens"] and not bl["medium"], str(bl)[:180])
+check("brief_loose_orientation", bl["orientation"] in ("portrait", "landscape", "square"),
+      bl["orientation"])
+check("brief_loose_recent", bl.get("recent") == ["窗边读书的少女", "雨夜街角"], str(bl.get("recent")))
+
+bfr = prompter.draw_brief(random.Random(7), brief_mode="free")
+check("brief_free_minimal", all(not bfr[k] for k in ("subject", "style", "composition",
+                                                   "light", "mood", "lens", "medium")),
+      str(bfr)[:200])
+check("brief_free_orientation", bfr["orientation"] in ("portrait", "landscape", "square"))
+check("brief_free_kind_not_forced", bfr["subject_kind"] in ("person", "other"),
+      str(bfr["subject_kind"]))
+
+t_loose = prompter.brief_text(bl)
+check("brief_text_loose_no_empty_fields", "题材=" not in t_loose and "构图=" not in t_loose,
+      t_loose)
+check("brief_text_loose_free_hint", "由你自己构思" in t_loose, t_loose)
+check("brief_text_loose_recent", "近期已经画过" in t_loose and "窗边读书的少女" in t_loose,
+      t_loose)
+t_full = prompter.brief_text(bf)
+check("brief_text_full_still_has_layers", "题材=" in t_full and "构图=" in t_full, t_full)
+check("brief_text_full_no_free_hint", "由你自己构思" not in t_full, t_full)
+
+sys_free = prompter.build_system_prompt("danbooru", {}, "both", free_brief=True)
+check("sys_free_rule", "自由创作" in sys_free, sys_free[-260:])
+check("sys_free_rule_override", "自由创作" in prompter.build_system_prompt(
+    "danbooru", {"override_danbooru": "only mine"}, "both", free_brief=True))
+check("sys_free_off", "自由创作" not in prompter.build_system_prompt("danbooru", {}, "both"))
+check("sys_free_natural", "自由创作" in prompter.build_system_prompt(
+    "natural", {}, "both", free_brief=True))
+check("sys_free_en", "Creative freedom" in prompter.build_system_prompt(
+    "natural_en", {}, "both", free_brief=True))
+
+# 自由模式下尺寸仍要能落值（构图为空时 pick_size 走组内随机）
+w, h = prompter.pick_size(prompter.SIZE_PRESETS["sdxl"], bfr["orientation"], "", random.Random(3))
+check("free_pick_size", (w, h) in [tuple(x) for v in prompter.SIZE_PRESETS["sdxl"].values() for x in v],
+      f"{w}x{h}")
+
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

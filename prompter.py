@@ -1002,6 +1002,30 @@ STYLE_WEIGHTS: dict = {
 STYLE_NONE_LABEL = "不指定（按底模默认，不要另加画风词）"
 DEFAULT_STYLE_NONE_PCT = 40
 
+# --------------------------------------------------------------------------- #
+# 创作自由度（v0.7.19）
+#
+# 用户反馈：「每张图要画的东西都被定死了，能不能让 AI 自己想」。
+# 确实：此前简报把 类别/题材/风格/构图/光色/氛围/镜头 七层全部抽好，LLM 只负责
+# 把中文翻成标签，创作空间接近零。这里给三档：
+#   full  —— 现行做法，逐层指定（稳定、可控、适合「我就想要这种」）
+#   loose —— 只给类别 + 光色/氛围这类「气氛」，题材/构图/画风全交给模型
+#   free  —— 只给类别与可画类型，画面内容完全由模型构思
+# 另外把「最近画过什么」一起告诉模型，避免它自己重复自己。
+# --------------------------------------------------------------------------- #
+
+BRIEF_MODES = ("full", "loose", "free")
+BRIEF_MODE_LABELS = {
+    "full": "定死（逐层抽签，最可控）",
+    "loose": "半自由（只给类别与气氛）",
+    "free": "自由（AI 自己构思画面）",
+}
+
+
+def normalize_brief_mode(v) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in BRIEF_MODES else "full"
+
 # 镜头层（只给写实线）：写真与肖像差一口气常常就差「什么镜头」。
 # 写成中文短语，让 LLM 自己转成目标语言；danbooru 系会写成 85mm lens / depth of field 类标签。
 LENS_PHOTO: list[str] = [
@@ -1153,6 +1177,8 @@ def draw_brief(
     animal_cats: "set[str] | None" = None,
     style_allow_3d: bool = False,
     style_none_pct: int = DEFAULT_STYLE_NONE_PCT,
+    brief_mode: str = "full",
+    recent: "list | None" = None,
 ) -> dict:
     """分层抽签生成创作简报。
 
@@ -1198,58 +1224,76 @@ def draw_brief(
         if filtered:
             cat_pool = filtered
 
+    mode = normalize_brief_mode(brief_mode)
     category = weighted_choice(rng, sorted(cat_pool.keys()), weights)
-    subject = rng.choice(cat_pool[category])
-    style_pool = _merge_words(
-        style_pool_for(category, wf_scope, allow_3d=style_allow_3d),
-        extra.get("风格"),
-    )
-    # v0.7.18：按比例「不指定画风」—— 让底模走自己的默认审美。
-    # 之前每一张都硬塞一个风格词（新海诚式/浮世绘/蒸汽波…），出图同质化且偏浓。
-    try:
-        none_pct = max(0, min(100, int(style_none_pct)))
-    except (TypeError, ValueError):
-        none_pct = DEFAULT_STYLE_NONE_PCT
-    if not style_pool:
-        style = ""
-    elif none_pct and rng.random() * 100 < none_pct:
-        style = ""
+    # v0.7.19：非 full 模式不再给现成题目，题材由模型自己拟
+    subject = "" if mode != "full" else rng.choice(cat_pool[category])
+
+    if mode == "full":
+        style_pool = _merge_words(
+            style_pool_for(category, wf_scope, allow_3d=style_allow_3d),
+            extra.get("风格"),
+        )
+        # v0.7.18：按比例「不指定画风」—— 让底模走自己的默认审美。
+        try:
+            none_pct = max(0, min(100, int(style_none_pct)))
+        except (TypeError, ValueError):
+            none_pct = DEFAULT_STYLE_NONE_PCT
+        if not style_pool:
+            style = ""
+        elif none_pct and rng.random() * 100 < none_pct:
+            style = ""
+        else:
+            style = weighted_choice(rng, style_pool, STYLE_WEIGHTS)
     else:
-        style = weighted_choice(rng, style_pool, STYLE_WEIGHTS)
-    # 光色池按时段收窄（v0.7.9）：凌晨三点不该抽到「黄昏暖光」。
-    # 用户自己追加的光色词不参与过滤 —— 那是显式意图，不该被时段否决。
+        style = ""  # 半自由/自由：画风也交给模型
+
+    # 光色/氛围属于「气氛」而不是「内容」：full 与 loose 都给，free 不给
     extra_lights = _merge_words([], extra.get("光色"))
     light_pool = daylight.filter_lights(LIGHTS, phase) if phase else list(LIGHTS)
-    # v0.7.18：光色也带权重（霓虹 0.35），否则夜间池里它占比过高
-    light = weighted_choice(rng, light_pool + extra_lights, LIGHT_WEIGHTS) if (
-        light_pool or extra_lights
-    ) else "自然光"
-    mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
+    if mode == "free":
+        light = ""
+        mood = ""
+    else:
+        # v0.7.18：光色也带权重（霓虹 0.35），否则夜间池里它占比过高
+        light = weighted_choice(rng, light_pool + extra_lights, LIGHT_WEIGHTS) if (
+            light_pool or extra_lights
+        ) else "自然光"
+        mood = rng.choice(_merge_words(MOODS, extra.get("氛围")))
 
-    # 主体类型决定构图池（v0.7.10）：人物偏近景，其余仍是十项均匀抽
-    kind = subject_kind(category, subject, animal_cats)
-    extra_comps: list[tuple[str, str]] = []
-    for item in _merge_words([], extra.get("构图")):
-        # 格式：名称@orientation
-        name, _, ori = item.partition("@")
-        if name and ori in ("landscape", "portrait", "square"):
-            extra_comps.append((name, ori))
-    base_comps = PERSON_COMPOSITIONS if (kind == "person" and person_closeup) else COMPOSITIONS
-    comp_pool = list(base_comps) + extra_comps
-    comp_name, orientation = rng.choice(comp_pool)
+    # 主体类型：没有题材时不做主体收口（否则会瞎套动物/人物约束）
+    kind = (
+        subject_kind(category, subject, animal_cats) if subject
+        else ("person" if category in PERSON_CATEGORIES else "other")
+    )
 
-    # 镜头 / 媒介层（v0.7.8）：写真线差一口气常常就差「什么镜头」，
-    # 动漫线差的是「成品形态」（立绘/封面/壁纸）。写实与动漫各抽一条，
-    # both 且没有风格组的题材（风景/星空…）不硬加。
+    comp_name, orientation = "", rng.choice(("portrait", "landscape", "square"))
     group = "photo" if wf_scope == "photo" else (
         "anime" if wf_scope == "anime" else CATEGORY_STYLE_GROUP.get(category, "all")
     )
-    lens = rng.choice(LENS_PHOTO) if group == "photo" else ""
-    # 人物近景时别抽「壁纸 / 游戏宣传图」这类横幅大构图（v0.7.12）：
-    # 它们会跟 close up / upper body 打架，模型只能折中成宣传图那种高对比的怪构图
-    medium_pool = MEDIUM_ANIME_CLOSEUP if (kind == "person" and person_closeup) else MEDIUM_ANIME
-    medium = rng.choice(medium_pool) if group == "anime" else ""
+    lens, medium = "", ""
+    if mode == "full":
+        # 主体类型决定构图池（v0.7.10）：人物偏近景，其余仍是十项均匀抽
+        extra_comps: list[tuple[str, str]] = []
+        for item in _merge_words([], extra.get("构图")):
+            # 格式：名称@orientation
+            name, _, ori = item.partition("@")
+            if name and ori in ("landscape", "portrait", "square"):
+                extra_comps.append((name, ori))
+        base_comps = PERSON_COMPOSITIONS if (kind == "person" and person_closeup) else COMPOSITIONS
+        comp_pool = list(base_comps) + extra_comps
+        comp_name, orientation = rng.choice(comp_pool)
 
+        # 镜头 / 媒介层（v0.7.8）：写真线差一口气常常就差「什么镜头」，
+        # 动漫线差的是「成品形态」（立绘/封面/壁纸）。写实与动漫各抽一条。
+        lens = rng.choice(LENS_PHOTO) if group == "photo" else ""
+        # 人物近景时别抽「壁纸 / 游戏宣传图」这类横幅大构图（v0.7.12）
+        medium_pool = (
+            MEDIUM_ANIME_CLOSEUP if (kind == "person" and person_closeup) else MEDIUM_ANIME
+        )
+        medium = rng.choice(medium_pool) if group == "anime" else ""
+
+    recent_list = [str(x).strip() for x in (recent or []) if str(x).strip()][:6]
     brief = {
         "category": category,
         "subject": subject,
@@ -1262,7 +1306,10 @@ def draw_brief(
         "lens": lens,
         "medium": medium,
         "subject_kind": kind,
+        "brief_mode": mode,
     }
+    if recent_list:
+        brief["recent"] = recent_list
     # 动物题材要明确「真实形态」，否则底模会往兽人/福瑞上靠
     if kind == "animal":
         brief["species_note"] = "真实动物（自然姿态，非拟人、不穿衣服、不直立）"
@@ -1280,32 +1327,44 @@ def brief_text(brief: dict, theme: str = "") -> str:
     v0.7.6：带上「可画类型」。此前 brief 里有 scope 却被丢弃，LLM 根本不知道
     这一轮要画二次元还是写实。
     """
-    subject = theme.strip() or brief.get("subject", "")
+    mode = normalize_brief_mode(brief.get("brief_mode"))
+    subject = (theme.strip() or str(brief.get("subject") or "")).strip()
     scope = SCOPE_LABEL_ZH[normalize_scope(brief.get("scope"))]
     # 画风可能为空：这轮就是「不指定画风」，让模型走底模默认审美（v0.7.18）
     style_txt = str(brief.get("style") or "").strip() or STYLE_NONE_LABEL
-    text = (
-        f"类别={brief.get('category', '')}；题材={subject}；画风={style_txt}；"
-        f"可画类型={scope}；"
-        f"构图={brief.get('composition', '')}；光色={brief.get('light', '')}；"
-        f"氛围={brief.get('mood', '')}"
-    )
-    # 镜头 / 媒介只在抽到时有（写实线才有镜头，动漫线才有媒介）
-    if str(brief.get("lens") or "").strip():
-        text += f"；镜头={brief['lens']}"
-    if str(brief.get("medium") or "").strip():
-        text += f"；成品形态={brief['medium']}"
+    parts = [f"类别={brief.get('category', '')}"]
+    if subject:
+        parts.append(f"题材={subject}")
+    parts.append(f"画风={style_txt}")
+    parts.append(f"可画类型={scope}")
+    # 自由模式下这些层是空的 —— 空就整段省略，别让模型看到「构图=」这种空占位
+    for label, key in (
+        ("构图", "composition"), ("光色", "light"), ("氛围", "mood"),
+        ("镜头", "lens"), ("成品形态", "medium"),
+    ):
+        val = str(brief.get(key) or "").strip()
+        if val:
+            parts.append(f"{label}={val}")
     if str(brief.get("phase") or "").strip():
-        text += f"；时段={daylight.phase_label(brief['phase'])}"
+        parts.append(f"时段={daylight.phase_label(brief['phase'])}")
     if str(brief.get("character") or "").strip():
-        text += f"；角色={brief['character']}"
+        parts.append(f"角色={brief['character']}")
     kind = str(brief.get("subject_kind") or "")
     if kind in KIND_LABEL_ZH:
-        text += f"；主体={KIND_LABEL_ZH[kind]}"
+        parts.append(f"主体={KIND_LABEL_ZH[kind]}")
     if str(brief.get("species_note") or "").strip():
-        text += f"；形态要求={brief['species_note']}"
+        parts.append(f"形态要求={brief['species_note']}")
     if str(brief.get("framing") or "").strip():
-        text += f"；取景={brief['framing']}"
+        parts.append(f"取景={brief['framing']}")
+    text = "；".join(parts)
+    if mode != "full":
+        text += (
+            "\n（本轮只给方向：画什么、谁在做什么、场景与构图、光线如何，都由你自己构思；"
+            "不要套用常见模板题材）"
+        )
+    recent = brief.get("recent") or []
+    if recent:
+        text += "\n近期已经画过（不要重复）：" + " / ".join(str(x) for x in recent[:6])
     return text
 
 
@@ -1386,9 +1445,27 @@ def opt_bool(v, default: bool = True) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on", "开启", "开")
 
 
+_FREE_BRIEF_RULES = {
+    "danbooru": (
+        "【自由创作】本轮简报只给方向（类别/气氛），具体画什么、人物在做什么、场景与构图、"
+        "光源全部由你自己构思。不要套用「雨中撑伞少女」「窗边读书」这类常见模板题材，"
+        "也不要与简报里「近期已经画过」的内容重复。上面关于画风与输出契约的要求仍然有效。"
+    ),
+    "natural": (
+        "【自由创作】本轮简报只给方向，具体画面（谁、在哪、在做什么、如何构图、什么光线）"
+        "由你自己构思，不要套用常见模板题材，也不要与「近期已经画过」的内容重复。"
+    ),
+    "natural_en": (
+        "[Creative freedom] This brief only gives a direction. Invent the concrete scene "
+        "yourself (subject, action, setting, framing, lighting); avoid stock concepts and "
+        "do not repeat anything listed under recently drawn. All other rules still apply."
+    ),
+}
+
+
 def build_system_prompt(
     tag_style: str, opts: dict | None = None, scope: str = "both", phase: str = "",
-    subject_kind: str = "",
+    subject_kind: str = "", free_brief: bool = False,
 ) -> str:
     """按提示词风格 + 工作流可画类型给系统提示词。
 
@@ -1425,6 +1502,8 @@ def build_system_prompt(
             subject_rule = ""
         else:
             subject_rule = _SUBJECT_RULES[kind][key]
+    # 自由创作规则（v0.7.19）：与其它硬规则同级，覆盖提示词时也追加
+    free_rule = _FREE_BRIEF_RULES[key] if free_brief else ""
 
     override = str(opts.get(f"override_{key}") or "").strip()
     if override:
@@ -1436,6 +1515,8 @@ def build_system_prompt(
             override = override.rstrip() + "\n" + time_rule + "\n"
         if subject_rule:
             override = override.rstrip() + "\n" + subject_rule + "\n"
+        if free_rule:
+            override = override.rstrip() + "\n" + free_rule + "\n"
         return override
 
     body = _SYSTEM_BODIES[key]
@@ -1453,6 +1534,8 @@ def build_system_prompt(
         rules.append(time_rule)
     if subject_rule:
         rules.append(subject_rule)
+    if free_rule:
+        rules.append(free_rule)
     if rules:
         body += "\n【附加规则（优先于以上通用要求）】\n" + "\n".join(rules) + "\n"
     return body + _SYSTEM_COMMON_TAIL
