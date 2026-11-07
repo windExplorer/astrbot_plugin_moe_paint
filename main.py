@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.13",
+    "v0.7.14",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -1337,11 +1337,17 @@ class MoePaintPlugin(Star):
         except Exception as e:
             logger.warning(f"{PLUGIN_TAG} 管理员通知发送失败: {e}")
 
-    def trigger_manual(self, theme: str = "", source: str = "webui") -> bool:
-        """异步触发一张（WebUI/跨插件用，立即返回；结果进图库并按名单投递）。"""
+    def trigger_manual(self, theme: str = "", source: str = "webui", template: str = "") -> bool:
+        """异步触发一张（WebUI/跨插件用，立即返回；结果进图库并按名单投递）。
+
+        `template` 非空时用指定工作流（控制台「立即画一张」旁边的下拉），
+        留空仍按 `workflow_selection` 的随机/顺序规则挑。
+        """
         if self._gen_lock.locked():
             return False
-        return self.spawn(self.generate_one(reason=f"manual:{source}", theme=theme)) is not None
+        return self.spawn(
+            self.generate_one(reason=f"manual:{source}", theme=theme, template=template)
+        ) is not None
 
     # ------------------------------------------------------------------ #
     # 重画 / 提示词收藏（v0.7.8）
@@ -1469,6 +1475,7 @@ class MoePaintPlugin(Star):
     async def generate_one(
         self, reason: str = "schedule", theme: str = "",
         event: "AstrMessageEvent | None" = None, reuse: "dict | None" = None,
+        template: str = "",
     ) -> dict:
         """完整跑一轮：抽签 → 连拍/重画 → 选优 → 投递最佳。
 
@@ -1484,12 +1491,15 @@ class MoePaintPlugin(Star):
             self.sched.running_since = datetime.now()
             self.sched.running_note = str(reason or "")[:40]
             try:
-                return await self._run_round(reason=reason, theme=theme, event=event, reuse=reuse)
+                return await self._run_round(
+                    reason=reason, theme=theme, event=event, reuse=reuse,
+                    template_hint=template,
+                )
             finally:
                 self.sched.running_since = None
                 self.sched.running_note = ""
 
-    async def _run_round(self, reason: str, theme: str, event, reuse) -> dict:
+    async def _run_round(self, reason: str, theme: str, event, reuse, template_hint: str = "") -> dict:
         """一轮 = 一次抽签 + 最多 N 张（连拍/低分重画）+ 投递最好那张。"""
         summary: dict = {
             "ok": False, "id": 0, "error": "", "skipped": False,
@@ -1497,7 +1507,7 @@ class MoePaintPlugin(Star):
         }
         store = self.store
         try:
-            plan = await self._plan(reason, theme, reuse)
+            plan = await self._plan(reason, theme, reuse, template_hint)
             brief = plan["brief"]
             tpl = plan["tpl"]
             guard = self._guard_enabled()
@@ -1580,8 +1590,12 @@ class MoePaintPlugin(Star):
             logger.exception(f"{PLUGIN_TAG} 生成轮次异常")
         return summary
 
-    async def _plan(self, reason: str, theme: str, reuse) -> dict:
-        """选模板 + 抽签（或从记录还原）。连拍与重画共用同一份计划。"""
+    async def _plan(self, reason: str, theme: str, reuse, template_hint: str = "") -> dict:
+        """选模板 + 抽签（或从记录还原）。连拍与重画共用同一份计划。
+
+        `template_hint`（控制台手动指定工作流）优先于轮换/随机；指定的模板不存在或
+        被停用时退回正常挑选并记一条调试日志 —— 手动画一张不该因为选错名字就失败。
+        """
         self.reload_templates()
         store = self.store
         if store is None:
@@ -1589,6 +1603,14 @@ class MoePaintPlugin(Star):
         mode = str(self._cfg().get("workflow_selection") or "random")
         last_key, legacy = await self._rotation_cursor(store)
         tpl = self._template_by_name((reuse or {}).get("workflow") or "") if reuse else None
+        hint = str(template_hint or "").strip()
+        if tpl is None and hint:
+            tpl = self._template_by_name(hint)
+            if tpl is None:
+                self.debug_log(
+                    "generate",
+                    f"指定的工作流「{hint}」不可用（未启用或已删除），本轮按原规则挑选",
+                )
         new_last = last_key
         if tpl is None:
             tpl, new_last = workflow_mgr.pick_template(

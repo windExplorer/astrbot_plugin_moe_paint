@@ -171,9 +171,11 @@ async def h_control(plugin) -> dict:
         plugin.sched.consecutive_failures = 0
         return ok({"paused": False})
     if action == "trigger":
-        theme = str(body.get("theme") or "").strip()[:50]
-        started = plugin.trigger_manual(theme, source="webui")
-        return ok({"started": bool(started), "theme": theme})
+        theme = str(body.get("theme") or "").strip()[:60]
+        # v0.7.14：可以指定工作流（留空 = 按当前轮换/随机规则挑）
+        template = str(body.get("template") or "").strip()[:60]
+        started = plugin.trigger_manual(theme, source="webui", template=template)
+        return ok({"started": bool(started), "theme": theme, "template": template})
     return err("action 必须是 pause / resume / trigger")
 
 

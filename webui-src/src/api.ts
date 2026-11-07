@@ -400,10 +400,14 @@ export function apiThumb(id: number, size = 320) {
   return apiGet<{ data_url: string; size: number }>(`/thumb?id=${id}&size=${size}`, 25000);
 }
 
-export function apiControl(action: "pause" | "resume" | "trigger", theme?: string) {
+export function apiControl(
+  action: "pause" | "resume" | "trigger",
+  theme?: string,
+  template?: string,
+) {
   return apiPost<{ started?: boolean }>(
     "/control",
-    { action, theme: theme || undefined },
+    { action, theme: theme || undefined, template: template || undefined },
     15000,
   );
 }

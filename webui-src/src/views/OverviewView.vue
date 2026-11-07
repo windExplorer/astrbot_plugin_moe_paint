@@ -6,6 +6,7 @@ import {
   NButton,
   NEmpty,
   NInput,
+  NSelect,
   NSpin,
   NTag,
   useMessage,
@@ -30,6 +31,7 @@ const thumbs = reactive<Record<number, string>>({});
 const logs = ref<DebugLogRow[]>([]);
 const loading = ref(false);
 const triggerTheme = ref("");
+const triggerTemplate = ref("");
 const triggerLoading = ref(false);
 const pauseLoading = ref(false);
 
@@ -75,10 +77,20 @@ async function refreshAll() {
   await Promise.all([loadRecent(), loadLogs()]);
 }
 
+/** 「立即画一张」的工作流下拉：自动（按轮换/随机规则）+ 启用且可用的模板 */
+const templateOptions = computed(() => [
+  { label: "工作流：自动", value: "" },
+  ...pool.value.map((t) => ({ label: t.name, value: t.name })),
+]);
+
 async function triggerDraw() {
   triggerLoading.value = true;
   try {
-    const d = await apiControl("trigger", triggerTheme.value.trim());
+    const d = await apiControl(
+      "trigger",
+      triggerTheme.value.trim(),
+      triggerTemplate.value,
+    );
     if (d.started) {
       message.success("已开始生成，稍后会自动出现在图库");
       triggerTheme.value = "";
@@ -138,6 +150,13 @@ onMounted(refreshAll);
             placeholder="主题词（可空 = 随机抽签）"
             size="small"
             @keyup.enter="triggerDraw"
+          />
+          <n-select
+            v-model:value="triggerTemplate"
+            :options="templateOptions"
+            size="small"
+            style="width: 180px"
+            :consistent-menu-width="false"
           />
           <n-button size="small" type="primary" :loading="triggerLoading" @click="triggerDraw">
             立即画一张
