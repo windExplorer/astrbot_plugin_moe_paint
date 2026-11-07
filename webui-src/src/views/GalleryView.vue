@@ -79,7 +79,17 @@ const viewerIndex = ref(0);
 const viewerRecord = computed<GenRecord | null>(() => records.value[viewerIndex.value] || null);
 
 const workflowOptions = computed(() => {
-  const list = (status.value?.templates || []).map((t) => ({ label: t.name, value: t.name }));
+  // 历史工作流也要能筛：模板停用/删除后，图库里那些图仍然存在。
+  // 来源三方合并：stats.by_workflow（全量历史）+ 当前启用模板 + 本页记录。
+  const enabled = new Set((status.value?.templates || []).map((t) => t.name));
+  const names = new Set<string>();
+  for (const w of stats.value?.by_workflow || []) if (w.workflow) names.add(w.workflow);
+  for (const t of status.value?.templates || []) if (t.name) names.add(t.name);
+  for (const r of records.value) if (r.workflow) names.add(r.workflow);
+  const list = [...names].sort((a, b) => a.localeCompare(b, "zh")).map((n) => ({
+    label: enabled.has(n) ? n : `${n}（已停用）`,
+    value: n,
+  }));
   return [{ label: "全部工作流", value: "" }, ...list];
 });
 

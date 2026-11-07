@@ -278,6 +278,271 @@ _SUBJECT_RULES: dict[str, dict[str, str]] = {
     },
 }
 
+# 近景友好的「成品形态」：壁纸 / 宣传图 / 跨页是横幅大构图，会跟特写半身打架
+MEDIUM_ANIME_CLOSEUP: list[str] = [
+    "角色立绘（无背景或渐变背景）", "动画关键帧质感", "分镜特写画面",
+    "轻小说封面插画", "画集插画",
+]
+
+# --------------------------------------------------------------------------- #
+# v0.7.12：提示词冲突压缩
+#
+# 真实案例（anima 底模，一张本应「雨夜街角」的图）：
+#   rainy night + neon lights + twilight + golden hour + warm light + candlelight
+#   + cinematic lighting + simple background + wet pavement + banner composition
+#   + game promo + close up + upper body
+# 七个光同时存在、两种背景互斥、banner 与 close up 打架 —— 模型只能取平均：
+# 颜色又艳又脏、对比拉满、像赛博朋克，一点都不柔和，也不再「二次元」。
+# 这里按「简报里定的那一项」做减法：光是保留与它同组的光源，背景/取景互斥项择一。
+# --------------------------------------------------------------------------- #
+
+# 光源组（真正会改变色彩与对比度的词）
+_LIGHT_SOURCES: dict[str, tuple[str, ...]] = {
+    "golden": (
+        "golden hour", "warm light", "sunset light", "sunlight", "afternoon light",
+        "orange light", "amber light", "warm glow",
+    ),
+    "neon": ("neon", "glowing signs", "led lights", "led sign", "cyberpunk light"),
+    "candle": ("candle", "lantern light", "firelight", "torchlight"),
+    "moon": ("moonlight", "moon light"),
+    "soft": ("soft light", "diffused light", "studio light", "softbox", "window light", "natural light"),
+    "overcast": ("overcast", "cloudy", "grey light", "gray light"),
+    "backlight": ("backlight", "rim light", "silhouette", "contre-jour"),
+    "mist": ("mist", "fog", "haze"),
+}
+
+# 时段组（同一条只该留一个：night / twilight / daylight 不能共存）
+_LIGHT_TIME: dict[str, tuple[str, ...]] = {
+    "night": ("night", "midnight", "starry", "nocturnal", "dark"),
+    "dusk": ("twilight", "dusk", "sunset", "golden hour"),
+    "dawn": ("dawn", "sunrise"),
+    "day": ("daylight", "daytime", "noon", "afternoon"),
+    "morning": ("morning",),
+    "evening": ("evening",),
+}
+
+# 简报光色 → 主光组（按顺序匹配，具体词优先：「烛火暖光」不能被「暖光」抢走）
+_PRIMARY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("烛",), "candle"),
+    (("霓虹", "赛博"), "neon"),
+    (("月光", "极光", "星云", "星", "夜"), "night"),
+    (("清晨", "薄雾", "雾"), "morning"),
+    (("丁达尔",), "day"),
+    (("逆光", "剪影"), "backlight"),
+    (("阴天",), "overcast"),
+    (("黄昏", "日落", "落日", "夕阳"), "golden"),
+    (("柔光", "影棚"), "soft"),
+    (("暖光",), "golden"),
+)
+
+# 主光组能容忍的其它光源 / 时段（搭配合理，不必删）
+_LIGHT_COMPATIBLE: dict[str, set] = {
+    "golden": {"golden", "backlight", "overcast", "soft"},
+    "neon": {"neon", "backlight", "overcast"},
+    "night": {"moon", "neon", "candle", "backlight", "soft", "overcast"},
+    "candle": {"candle", "backlight", "soft"},
+    "morning": {"mist", "soft", "overcast", "backlight"},
+    "day": {"golden", "soft", "overcast", "backlight", "mist"},
+    "overcast": {"overcast", "soft", "mist"},
+    "backlight": {"backlight", "golden", "soft"},
+    "soft": {"soft", "backlight", "overcast"},
+    "mist": {"mist", "soft", "overcast"},
+}
+_LIGHT_TIME_OK: dict[str, set] = {
+    "golden": {"dusk", "evening"},
+    "neon": {"night", "evening"},
+    "night": {"night"},
+    "candle": {"night", "evening"},
+    "morning": {"morning", "dawn"},
+    "day": {"day", "morning"},
+    "overcast": {"day", "morning"},
+    "backlight": {"dusk", "day", "evening"},
+    "soft": {"day", "morning"},
+    "mist": {"morning", "dawn"},
+}
+
+_PLAIN_BG = (
+    "simple background", "white background", "gradient background",
+    "no background", "solid background", "transparent background",
+)
+_SCENE_WORDS = (
+    "street", "city", "room", "indoor", "outdoor", "forest", "beach", "station",
+    "shop", "cafe", "classroom", "building", "skyline", "pavement", "alley",
+    "temple", "shrine", "park", "field", "mountain", "ocean", "sea", "river",
+    "ruins", "laboratory", "library", "desk", "balcony", "rooftop",
+)
+_CLOSE_TAGS = ("close up", "close-up", "upper body", "portrait", "cowboy shot", "bust")
+_WIDE_TAGS = (
+    "full body", "wide shot", "long shot", "establishing shot", "panorama",
+    "banner composition", "game promo", "wallpaper", "key visual layout",
+)
+
+SOFT_COLOR_TAGS = "soft lighting, pastel colors, gentle shading"
+SOFT_COLOR_NEG = "oversaturated, high contrast, harsh shadows"
+
+# 人物锚定里的「摄影线」标签：塞进二次元标签串只会把画面往写实/深色皮肤拉
+PHOTO_ONLY_PERSONA_TAGS = {
+    "asian", "east asian", "asian woman", "east asian woman", "photorealistic",
+    "real photo", "photograph",
+}
+
+
+def _light_primary(brief_light) -> str:
+    text = str(brief_light or "")
+    for keys, group in _PRIMARY_RULES:
+        if any(k in text for k in keys):
+            return group
+    return ""
+
+
+def _classify_light(tag: str) -> "tuple[str, str]":
+    """标签 → (光源组, 时段组)，都不是就返回空串。"""
+    low = str(tag or "").lower()
+    src = ""
+    for group, keys in _LIGHT_SOURCES.items():
+        if any(k in low for k in keys):
+            src = group
+            break
+    when = ""
+    for group, keys in _LIGHT_TIME.items():
+        if any(k in low for k in keys):
+            when = group
+            break
+    return src, when
+
+
+def reduce_lighting(tags, brief_light) -> "tuple[list, list]":
+    """按简报的光色做减法：同组光源最多 2 个、时段最多 1 个，冲突的挑出来。
+
+    没有简报依据（brief_light 为空）时退化为「只留第一个光源 + 第一个时段」，
+    仍然比七个光同时上更稳。
+    """
+    primary = _light_primary(brief_light)
+    kept: list[str] = []
+    dropped: list[str] = []
+    n_src = 0
+    n_time = 0
+    for tag in tags:
+        src, when = _classify_light(tag)
+        if not src and not when:
+            kept.append(tag)
+            continue
+        if not primary:
+            if src:
+                if n_src >= 1:
+                    dropped.append(tag)
+                    continue
+                n_src += 1
+            elif when:
+                if n_time >= 1:
+                    dropped.append(tag)
+                    continue
+                n_time += 1
+            kept.append(tag)
+            continue
+        if src and src not in _LIGHT_COMPATIBLE.get(primary, {primary}):
+            dropped.append(tag)
+            continue
+        if (not src) and when and when not in _LIGHT_TIME_OK.get(primary, set()):
+            dropped.append(tag)
+            continue
+        if src:
+            if n_src >= 2:
+                dropped.append(tag)
+                continue
+            n_src += 1
+        elif when:
+            if n_time >= 1:
+                dropped.append(tag)
+                continue
+            n_time += 1
+        kept.append(tag)
+    return kept, dropped
+
+
+def reduce_background(tags) -> "tuple[list, list]":
+    """背景互斥：写了具体场景就别再写 simple background，反之亦然。"""
+    has_scene = any(any(w in t.lower() for w in _SCENE_WORDS) for t in tags)
+    has_plain = any(t.lower() in _PLAIN_BG for t in tags)
+    kept: list[str] = []
+    dropped: list[str] = []
+    for tag in tags:
+        low = tag.lower()
+        if low in _PLAIN_BG:
+            if has_scene:
+                dropped.append(tag)
+                continue
+        elif "blurry background" in low or "background blur" in low:
+            # 纯色/渐变背景 + 虚化背景同时存在时，以纯色背景为准（人物特写更干净）
+            if has_plain and not has_scene:
+                dropped.append(tag)
+                continue
+        kept.append(tag)
+    return kept, dropped
+
+
+def reduce_framing(tags, composition) -> "tuple[list, list]":
+    """取景互斥：特写/半身时删掉 full body / banner / 宣传图 / 壁纸这类大构图。"""
+    comp = str(composition or "")
+    close = any(k in comp for k in ("特写", "半身", "肖像", "中景"))
+    wide = any(k in comp for k in ("全景", "远景", "全身", "俯瞰", "超广角"))
+    if not (close or wide):
+        return list(tags), []
+    kept: list[str] = []
+    dropped: list[str] = []
+    for tag in tags:
+        low = tag.lower()
+        if close and any(k in low for k in _WIDE_TAGS):
+            dropped.append(tag)
+            continue
+        if wide and any(k in low for k in _CLOSE_TAGS):
+            dropped.append(tag)
+            continue
+        kept.append(tag)
+    return kept, dropped
+
+
+def reduce_conflicts(
+    payload: dict, brief: dict, tag_style: str = "danbooru", opts: dict | None = None
+) -> dict:
+    """把互相打架的标签挑出来塞进 negative（v0.7.12）。
+
+    只对 danbooru 风格生效：自然语言里「黄昏的光落在湿漉漉的街上」这类句子不能按
+    标签切。清掉的标签会进负向 —— 只删不压制，模型仍可能自己补回来。
+    """
+    out = dict(payload or {})
+    opts = opts or {}
+    if _style_key(str(tag_style or "")) != "danbooru":
+        return out
+    if not opt_bool(opts.get("conflict_cleanup"), True):
+        return out
+    brief = brief or {}
+    tags = split_tag_list(out.get("prompt", ""))
+    if not tags:
+        return out
+    tags, d_light = reduce_lighting(tags, brief.get("light"))
+    tags, d_bg = reduce_background(tags)
+    tags, d_frame = reduce_framing(tags, brief.get("composition"))
+    dropped = (d_light + d_bg + d_frame)[:12]
+    out["prompt"] = ", ".join(tags)
+    if dropped:
+        out["_dropped"] = dropped
+        out["negative"] = _merge_tags(out.get("negative", ""), ", ".join(dropped), False)
+    return out
+
+
+def apply_soft_color(payload: dict, tag_style: str, opts: dict | None = None) -> dict:
+    """可选：把色彩往柔和方向压（`prompt.soft_color`，默认关）。"""
+    out = dict(payload or {})
+    opts = opts or {}
+    if not opt_bool(opts.get("soft_color"), False):
+        return out
+    if _style_key(str(tag_style or "")) != "danbooru":
+        return out
+    out["prompt"] = _merge_tags(out.get("prompt", ""), SOFT_COLOR_TAGS, False)
+    out["negative"] = _merge_tags(out.get("negative", ""), SOFT_COLOR_NEG, False)
+    return out
+
 SCOPES_VALID = ("anime", "photo", "both")
 
 SCOPE_LABEL_ZH: dict[str, str] = {
@@ -852,7 +1117,10 @@ def draw_brief(
         "anime" if wf_scope == "anime" else CATEGORY_STYLE_GROUP.get(category, "all")
     )
     lens = rng.choice(LENS_PHOTO) if group == "photo" else ""
-    medium = rng.choice(MEDIUM_ANIME) if group == "anime" else ""
+    # 人物近景时别抽「壁纸 / 游戏宣传图」这类横幅大构图（v0.7.12）：
+    # 它们会跟 close up / upper body 打架，模型只能折中成宣传图那种高对比的怪构图
+    medium_pool = MEDIUM_ANIME_CLOSEUP if (kind == "person" and person_closeup) else MEDIUM_ANIME
+    medium = rng.choice(medium_pool) if group == "anime" else ""
 
     brief = {
         "category": category,
@@ -1100,11 +1368,16 @@ def apply_persona(
 
     if opt_bool(opts.get("persona_enabled"), True):
         if cat in PERSON_CATEGORIES and key == "danbooru":
-            out["prompt"] = _merge_tags(
-                out.get("prompt", ""),
-                str(opts.get("persona_tags") or DEFAULT_PERSONA_TAGS),
-                True,
-            )
+            persona_tags = str(opts.get("persona_tags") or DEFAULT_PERSONA_TAGS)
+            if opt_bool(opts.get("persona_strip_photo"), True):
+                # v0.7.12：asian / east asian 是摄影线标签，塞进二次元标签串只会把
+                # 画面往写实与偏深的肤色拉（负向里还写着 dark skin，等于自相矛盾）
+                persona_tags = ", ".join(
+                    t for t in split_tag_list(persona_tags)
+                    if t.lower() not in PHOTO_ONLY_PERSONA_TAGS
+                )
+            if persona_tags.strip():
+                out["prompt"] = _merge_tags(out.get("prompt", ""), persona_tags, True)
         neg = (
             str(opts.get("persona_negative_zh") or DEFAULT_PERSONA_NEGATIVE_ZH)
             if key == "natural"

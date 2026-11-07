@@ -1,5 +1,63 @@
 # 更新日志
 
+## v0.7.12（图库筛选修历史工作流；提示词冲突压缩，治「又艳又深像赛博朋克」）
+
+### 一、图库筛选只能选到启用中的工作流
+
+`workflowOptions` 原来只取 `status.templates`（= 当前启用的模板池），停用或删除的
+模板对应的历史图片就再也筛不出来了。
+
+改为三方合并：`stats.by_workflow`（全量历史）+ 当前模板 + 本页记录；不在启用池里的
+标成「（已停用）」，选中后照常按 `workflow=` 过滤。
+
+### 二、anima 底模出图「色彩艳丽、太深、像赛博朋克、不柔和」
+
+用户给了一份真实提示词，问题一眼可见：**一句话里塞了 7 个光**。
+
+```
+rainy night, neon lights, twilight, golden hour, warm light, candlelight,
+cinematic lighting, glowing signs ... simple background, wet pavement, empty street,
+banner composition, game promo, close up, upper body
+```
+
+- 7 个光互相矛盾（雨夜 / 黄昏 / 暖光 / 烛火 / 霓虹 / 电影光）→ CLIP 只能取平均，
+  结果是又艳又脏、对比拉满、橙+霓虹混成赛博朋克；
+- `simple background` 与「湿漉漉的空街」互斥 → 背景被折中成一团；
+- `banner composition` / `game promo` 与 `close up` / `upper body` 互斥 → 构图被拉成
+  宣传图那种高对比怪构图。
+
+修复（`prompter.reduce_conflicts`，`prompt.conflict_cleanup` 默认开，仅 danbooru）：
+
+- **光源做减法**：按简报光色选主组（霓虹 → 只留 neon / glowing signs），同组最多 2 个，
+  其它组（golden hour / warm light / candlelight）删掉；
+- **时段只留一个**：雨夜保留 `rainy night`，`twilight` 删掉；
+- **背景互斥**：有具体场景就删 `simple background`；纯色与 `blurry background` 二选一；
+- **取景互斥**：特写/半身时删 `full body / banner composition / game promo / wallpaper`；
+- 被删的标签**写进负向**（只删不压制，模型会自己补回来），调试页显示「压掉 N 个冲突词」。
+
+顺带两处相关修正：
+
+- 人物锚定的 `asian / east asian` 是摄影线标签，会往写实与偏深肤色拉，而负向里还写着
+  `dark skin` —— danbooru 线默认剔除（`prompt.persona_strip_photo`）；
+- 动漫「成品形态」在人物近景时改抽立绘 / 关键帧 / 分镜特写，不再抽壁纸 / 游戏宣传图 /
+  跨页这类横幅构图（它们会跟 `close up` 打架）。
+
+另加可选项 `prompt.soft_color`（默认关）：追加 `soft lighting, pastel colors,
+gentle shading`，负向加 `oversaturated, high contrast, harsh shadows`。嫌艳就直接开。
+
+### 前端
+
+- 图库筛选：历史/已停用工作流可筛（标注「已停用」）。
+- 提示词页新增「提示词冲突压缩」卡（压缩开关、柔和色彩、剔除摄影标签）。
+- 调试页 LLM 试跑新增「压掉 N 个冲突词」标签（悬停看具体词）。
+
+### 测试
+
+- `test_prompter` 用**真实翻车提示词**当 fixture，增补 25 条：霓虹/黄昏/烛火三种主光
+  下的增减、无简报时的收敛、背景互斥、取景互斥（特写/全景双向）、负向承接、
+  自然语言不处理、开关关闭、柔和色彩、摄影标签剔除、近景成品形态池。
+- `test_schema` 增补 3 个新键守卫；9 个自检全 PASS。
+
 ## v0.7.11（工作流留档：每张图都能看到真正提交的完整工作流）
 
 需求：「有的图片有问题，感觉是提示词的问题，但没有完整工作流看不出来」。

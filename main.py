@@ -59,7 +59,7 @@ _PICK_RANDOM = random.Random()
     "astrbot_plugin_moe_paint",
     "windExplorer",
     "萌萌绘卷：定时 LLM 提示词 + ComfyUI 自动绘图 + 图库 WebUI",
-    "v0.7.11",
+    "v0.7.12",
 )
 class MoePaintPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -781,6 +781,10 @@ class MoePaintPlugin(Star):
             out = prompter.apply_character(out, char, tpl.tag_style)
             # 主体收口（v0.7.10）：动物加 animal focus + 反拟人词；人物加细节词
             out = prompter.apply_subject(out, brief, tpl.tag_style, opts)
+            # 冲突压缩（v0.7.12）：七个光同时上 / simple background 与街景并存 /
+            # banner 与 close up 打架 —— 按简报做减法，清掉的标签进负向
+            out = prompter.reduce_conflicts(out, brief, tpl.tag_style, opts)
+            out = prompter.apply_soft_color(out, tpl.tag_style, opts)
             out["prompt"] = prompter.apply_quality_prefix(out.get("prompt", ""), quality)
             out = prompter.apply_negative_base(out, tpl.tag_style, opts)
             out["_tag_count"] = len(prompter.split_tag_list(out.get("prompt", "")))
@@ -890,6 +894,7 @@ class MoePaintPlugin(Star):
                 tag_count=int(payload.get("_tag_count") or 0),
                 args_note=str(args.get("error") or ""),
                 time_fixed=bool(payload.get("_time_fixed")),
+                dropped=list(payload.get("_dropped") or []),
             )
             self.debug_log("llm", f"试跑成功（{label}，{ms / 1000:.1f}s，{width}x{height}）")
         except Exception as e:

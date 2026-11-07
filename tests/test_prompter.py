@@ -315,8 +315,9 @@ check("sys_override_natural_shared", "only this" in ov3 and "你是一位顶级"
 # ---------- v0.7.3：人物锚定硬约束（问题 3） ----------
 base = {"prompt": "night, school uniform, smile", "negative": "lowres, bad hands", "caption": "x"}
 p = prompter.apply_persona(base, "danbooru", {"category": "动漫少女"})
-check("persona_tags_prepended", p["prompt"].startswith("1girl, solo, asian")
-      and p["prompt"].endswith("night, school uniform, smile"))
+# v0.7.12：asian / east asian 属摄影线标签，默认从人物锚定里剔除
+check("persona_tags_prepended", p["prompt"].startswith("1girl, solo, young adult woman")
+      and p["prompt"].endswith("night, school uniform, smile"), p["prompt"])
 check("persona_negative_added", "old woman" in p["negative"] and "underage" in p["negative"])
 check("persona_keeps_original_negative", p["negative"].startswith("lowres, bad hands"))
 p2 = prompter.apply_persona(p, "danbooru", {"category": "动漫少女"})
@@ -615,6 +616,82 @@ check("sys_animal_rule_off", "animal focus" not in prompter.build_system_prompt(
 sys_person = prompter.build_system_prompt("danbooru", {}, "anime", subject_kind="person")
 check("sys_person_rule", "close-up" in sys_person, sys_person[-300:])
 check("sys_kind_none", "animal focus" not in prompter.build_system_prompt("danbooru", {}, "both"))
+
+# ---------- v0.7.12：冲突压缩（用真实翻车案例当 fixture） ----------
+BAD = (
+    "masterpiece, best quality, anime style, 2d, cel shading, solo, asian, east asian, "
+    "1girl, rain, umbrella, neon lights, rainy night, city corner, twilight, golden hour, "
+    "warm light, candlelight, lonely, empty street, glowing signs, wet pavement, close up, "
+    "upper body, banner composition, game promo, simple background, blurry background, "
+    "cinematic lighting, sharp focus, depth of field"
+)
+bad_tags = prompter.split_tag_list(BAD)
+
+kept_n, drop_n = prompter.reduce_lighting(bad_tags, "霓虹夜色")
+check("light_neon_keeps_neon", "neon lights" in kept_n and "glowing signs" in kept_n, str(kept_n))
+check("light_neon_drops_golden", "golden hour" not in kept_n and "golden hour" in drop_n, str(drop_n))
+check("light_neon_drops_candle", "candlelight" not in kept_n and "candlelight" in drop_n)
+check("light_neon_drops_twilight", "twilight" not in kept_n)
+check("light_neon_keeps_rainy_night", "rainy night" in kept_n)
+kept_g, _drop_g = prompter.reduce_lighting(bad_tags, "黄昏暖光")
+check("light_golden_keeps_warm", "golden hour" in kept_g and "warm light" in kept_g, str(kept_g))
+check("light_golden_drops_neon", "neon lights" not in kept_g and "rainy night" not in kept_g)
+kept_c, _ = prompter.reduce_lighting(bad_tags, "烛火暖光")
+check("light_candle_primary", "candlelight" in kept_c and "golden hour" not in kept_c, str(kept_c))
+kept_none, _ = prompter.reduce_lighting(bad_tags, "")
+check("light_no_brief_caps_one_source",
+      len([t for t in kept_none if prompter._classify_light(t)[0]]) <= 1, str(kept_none))
+
+bg_kept, bg_drop = prompter.reduce_background(bad_tags)
+check("bg_scene_drops_simple", "simple background" not in bg_kept and "simple background" in bg_drop,
+      str(bg_drop))
+check("bg_scene_keeps_blurry", "blurry background" in bg_kept, str(bg_kept))
+
+fr_kept, fr_drop = prompter.reduce_framing(bad_tags, "特写·竖幅")
+check("frame_closeup_drops_banner",
+      "banner composition" not in fr_kept and "game promo" not in fr_kept, str(fr_drop))
+check("frame_closeup_keeps_closeup", "close up" in fr_kept and "upper body" in fr_kept)
+fr_wide, _ = prompter.reduce_framing(bad_tags, "全景·横幅")
+check("frame_wide_drops_closeup", "close up" not in fr_wide and "upper body" not in fr_wide, str(fr_wide))
+
+p_conf = prompter.reduce_conflicts(
+    {"prompt": BAD, "negative": "lowres"},
+    {"light": "霓虹夜色", "composition": "特写·竖幅"}, "danbooru",
+)
+check("conflicts_prompt_clean",
+      "golden hour" not in p_conf["prompt"] and "banner composition" not in p_conf["prompt"]
+      and "simple background" not in p_conf["prompt"], p_conf["prompt"])
+check("conflicts_negative_carries", "golden hour" in p_conf["negative"]
+      and "banner composition" in p_conf["negative"], p_conf["negative"])
+check("conflicts_keeps_scene", "neon lights" in p_conf["prompt"] and "rainy night" in p_conf["prompt"])
+check("conflicts_natural_untouched",
+      prompter.reduce_conflicts({"prompt": BAD, "negative": ""},
+                                {"light": "霓虹夜色"}, "natural")["prompt"] == BAD)
+check("conflicts_switch_off",
+      prompter.reduce_conflicts({"prompt": BAD, "negative": ""},
+                                {"light": "霓虹夜色"}, "danbooru",
+                                {"conflict_cleanup": False})["prompt"] == BAD)
+
+check("soft_color_off_default", prompter.apply_soft_color({"prompt": "1girl"}, "danbooru", {})["prompt"] == "1girl")
+soft = prompter.apply_soft_color({"prompt": "1girl", "negative": ""}, "danbooru", {"soft_color": True})
+check("soft_color_on", "pastel colors" in soft["prompt"] and "oversaturated" in soft["negative"], str(soft))
+check("soft_color_natural_off",
+      prompter.apply_soft_color({"prompt": "少女"}, "natural", {"soft_color": True})["prompt"] == "少女")
+
+# 人物锚定剔除摄影标签（asian / east asian 不该进二次元标签串）
+persona_on = prompter.apply_persona({"prompt": "1girl", "negative": ""}, "danbooru",
+                                    {"category": "动漫少女"}, {}, "both")
+check("persona_strip_photo", "asian" not in persona_on["prompt"], persona_on["prompt"])
+check("persona_keeps_adult", "young adult woman" in persona_on["prompt"], persona_on["prompt"])
+persona_raw = prompter.apply_persona({"prompt": "1girl", "negative": ""}, "danbooru",
+                                     {"category": "动漫少女"}, {"persona_strip_photo": False}, "both")
+check("persona_strip_photo_off", "asian" in persona_raw["prompt"], persona_raw["prompt"])
+
+# 近景时不再抽「壁纸 / 宣传图」这类大构图
+only_person2 = set(prompter.CATEGORIES) - {"动漫少女"}
+media = {prompter.draw_brief(random.Random(s), disabled_categories=only_person2)["medium"]
+         for s in range(40)}
+check("medium_closeup_pool", media <= set(prompter.MEDIUM_ANIME_CLOSEUP), str(media))
 
 print("prompter:", "PASS" if not failures else f"FAIL({len(failures)})")
 sys.exit(1 if failures else 0)

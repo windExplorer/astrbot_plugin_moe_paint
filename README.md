@@ -125,7 +125,7 @@
 | 页面 | 内容 |
 | --- | --- |
 | 总览 | 下次生成倒计时、今日 / 累计 / 成功率、最近的图与事件、工作流健康、立即画一张 |
-| 图库 | 状态 / 工作流 / 类别 / 关键词 / 只看收藏筛选；网格缩略图（带质检分）；详情抽屉（全元数据、复制提示词与 seed、收藏、重投、**同 seed 重画 / 换 seed 变体 / 试评分 / 查看工作流**、收藏提示词、删除）；顶部**提示词收藏**卡片；**全屏看大图**（滚轮缩放 / 拖动 / ←→ 切换 / Esc 关闭）；有新增记录时自动刷新 |
+| 图库 | 状态 / 工作流（**含已停用 / 已删除模板的历史工作流**）/ 类别 / 关键词 / 只看收藏筛选；网格缩略图（带质检分）；详情抽屉（全元数据、复制提示词与 seed、收藏、重投、**同 seed 重画 / 换 seed 变体 / 试评分 / 查看工作流**、收藏提示词、删除）；顶部**提示词收藏**卡片；**全屏看大图**（滚轮缩放 / 拖动 / ←→ 切换 / Esc 关闭）；有新增记录时自动刷新 |
 | 调度计划 | 图形化设置：模式二选一（间隔 / 每天时刻）、间隔单位换算、安静时段开关、每日上限开关、保存即重算下次计划 |
 | 投递 | 会话名单（UMO，每行一个）、附带文案开关与模板、发测试消息 |
 | 生成服务 | ComfyUI 地址与等待预算、队列避让阈值、提示词模型与超时、图库容量、管理员通知 |
@@ -180,6 +180,9 @@
 | `prompt.animal_categories` | `自然生态` | 哪些类别按动物处理；只在题材确实提到动物时生效 |
 | `prompt.person_closeup` | `true` | 人物题材构图偏近景（特写×2 / 半身×2 / 中景 / 全身） |
 | `prompt.person_detail` | `true` | 人物细节词（detailed face/eyes/skin、sharp focus）并压掉杂乱背景 |
+| `prompt.persona_strip_photo` | `true` | 人物锚定剔除 `asian` / `east asian` 这类摄影线标签（只对 danbooru） |
+| `prompt.conflict_cleanup` | `true` | 冲突压缩：多光源/多时段去重、背景互斥、取景互斥，清掉的进负向 |
+| `prompt.soft_color` | `false` | 柔和色彩：加 soft lighting / pastel colors，压 oversaturated / high contrast |
 | `debug.save_workflows` | `true` | 保存每轮提交给 ComfyUI 的完整工作流（图库「查看工作流」用） |
 | `debug.keep_workflows` | `200` | 工作流快照保留条数，超出按最旧清理；`0` = 不限 |
 | `schedule.mode` | `interval` | `interval` 按间隔 / `daily` 每天时刻 |
@@ -523,6 +526,45 @@ A 和 B 都填才生效，且最好只改一个变量，否则比不出结论。
 
 ---
 
+## 七·十二、提示词冲突压缩：为什么颜色又艳又脏（v0.7.12）
+
+真实案例（anima 底模，一张本该「雨夜街角」的图）的提示词：
+
+```
+rainy night, neon lights, twilight, golden hour, warm light, candlelight,
+cinematic lighting, simple background, wet pavement, empty street,
+banner composition, game promo, close up, upper body
+```
+
+一句话里有 **7 个光**（雨夜 / 霓虹 / 黄昏 / 暖光 / 烛火 / 电影光 / 发光招牌）、
+**2 个互斥背景**（simple background + 湿漉漉的街）、**2 个互斥取景**（banner 宣传图 +
+close up 半身）。CLIP 不会「挑一个理解」，它会把这些平均成一锅：颜色又艳又脏、
+对比拉满、像赛博朋克，而且因为 cel shading + 高对比，一点都不柔和。
+
+现在会自动做减法（`prompt.conflict_cleanup`，默认开）：
+
+| 冲突类型 | 处理 |
+| --- | --- |
+| 光源 | 按简报的光色选主组（霓虹 → 保留 neon / glowing signs），同组最多 2 个；其它组（golden hour / candlelight / warm light）删掉 |
+| 时段 | 深夜 / 黄昏 / 白天只留一个（雨夜保留 rainy night，twilight 删掉） |
+| 背景 | 写了具体场景（street / city / pavement…）就删 `simple background`；纯色背景与 `blurry background` 二选一 |
+| 取景 | 简报是特写/半身时删 `full body / banner composition / game promo / wallpaper`；反之删 `close up / upper body` |
+
+被删的标签会**写进负向**——只删不压制，模型仍会自己补回来。
+另外两处相关修正：
+
+- 人物锚定里的 `asian / east asian` 属摄影线标签，在 danbooru 线会被剔除
+  （`prompt.persona_strip_photo`）：它们会把画面往写实与偏深肤色拉，而负向里还写着
+  `dark skin`，等于自相矛盾。
+- 动漫「成品形态」抽签在人物近景时改抽立绘 / 关键帧 / 分镜特写，不再抽
+  壁纸 / 游戏宣传图 / 跨页这类横幅大构图。
+
+还嫌艳、嫌深：打开「提示词 → 冲突压缩 → 柔和色彩」（`prompt.soft_color`），会追加
+`soft lighting, pastel colors, gentle shading` 并把 `oversaturated / high contrast /
+harsh shadows` 写进负向。
+
+---
+
 ## 八、提示词工程（为什么不容易「画腻」）
 
 1. **分层抽签**：类别、题材、风格、构图、光色、氛围每层独立随机 → 组成一句「创作简报」。
@@ -588,6 +630,8 @@ A 和 B 都填才生效，且最好只改一个变量，否则比不出结论。
 | 人物画得太远 / 背景太杂 | 确认 `person_closeup`、`person_detail` 都开着；构图名在简报里（调试页能看「构图=特写·竖幅」）。写实线还会叠加镜头层（85mm 浅景深），两者不冲突 |
 | 想要回原来的远景构图 | 关掉 `person_closeup` 即可恢复十项均匀抽；两个都关就完全是旧行为 |
 | 「查看工作流」是灰的 | 三种原因：这条是旧版本生成的记录（当时还没留档）、快照已超过 `debug.keep_workflows` 被清掉、或 `debug.save_workflows` 被关了。新版生成的图都会有 |
+| 颜色太艳 / 太深 / 像赛博朋克 | 先看「调试与日志 → LLM 试跑」：新版本会显示「压掉 N 个冲突词」，鼠标悬停看是哪几个。若还是艳，打开「提示词 → 冲突压缩 → 柔和色彩」（会把 oversaturated / high contrast 写进负向）；再不行就是底模本身的色彩倾向（可换 checkpoint 或在自定义规则里写「低饱和、胶片色调」） |
+| 图库筛不到某个旧工作流 | v0.7.12 起筛选列表来自全量历史（`stats.by_workflow`），已停用模板会标「（已停用）」；如果切页后暂时没有，点一下刷新即可 |
 | 想看某一轮到底提交了什么 | 图库点开那张图 →「查看工作流」→ 搜 `prompt` / `negative` / `seed` / `steps`。这是**注入后**的真实图，比记录里的字段可信 |
 | A/B 没有对比数据 | 需要同时打开「成图自检」（否则没有分数）；且 A、B 两版都要填、至少各出几张图后才有样本 |
 

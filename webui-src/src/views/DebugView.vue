@@ -384,6 +384,15 @@ onMounted(async () => {
             <n-tag v-if="llmRes.time_fixed" size="small" :bordered="false" type="warning">
               已按时段纠偏
             </n-tag>
+            <n-tag
+              v-if="(llmRes.dropped || []).length"
+              size="small"
+              :bordered="false"
+              type="warning"
+              :title="(llmRes.dropped || []).join('、')"
+            >
+              压掉 {{ (llmRes.dropped || []).length }} 个冲突词
+            </n-tag>
             <span class="mp-sub">{{ llmRes.llm_provider }}</span>
           </div>
           <div v-if="llmRes.args_note" class="mp-err" style="margin-top: 6px">

@@ -349,6 +349,8 @@ export interface LlmPreview {
   character?: string;
   /** 是否因「与时段矛盾」被纠偏重写过 */
   time_fixed?: boolean;
+  /** 冲突压缩清掉的标签（已写进负向） */
+  dropped?: string[];
 }
 
 export interface ProviderRow {

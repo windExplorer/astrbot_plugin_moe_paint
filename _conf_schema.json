@@ -188,6 +188,24 @@
         "default": true,
         "hint": "danbooru 风格会追加 detailed face / beautiful detailed eyes / detailed skin / sharp focus / depth of field，并压掉杂乱背景；自然语言风格改为在简报里要求「人物细节优先、背景一句带过」"
       },
+      "persona_strip_photo": {
+        "description": "人物锚定剔除摄影标签",
+        "type": "bool",
+        "default": true,
+        "hint": "把 asian / east asian 这类摄影线标签从人物锚定里去掉（只对 danbooru 风格）。这些词塞进二次元标签串会把画面往写实、偏深肤色拉，和负向里的 dark skin 自相矛盾"
+      },
+      "conflict_cleanup": {
+        "description": "提示词冲突压缩",
+        "type": "bool",
+        "default": true,
+        "hint": "按简报做减法：同一时段只留一个时段词、同组光源最多两个（霓虹夜景里不会同时出现 golden hour / candlelight）；街景里删掉 simple background；特写时删掉 full body / banner / game promo。被删的标签会写进负向"
+      },
+      "soft_color": {
+        "description": "柔和色彩（可选）",
+        "type": "bool",
+        "default": false,
+        "hint": "给 danbooru 风格追加 soft lighting / pastel colors / gentle shading，并把 oversaturated、high contrast、harsh shadows 写进负向。觉得出图「太艳、太深、像赛博朋克」时打开它"
+      },
       "style_anchor_enabled": {
         "description": "启用画风硬锚定",
         "type": "bool",

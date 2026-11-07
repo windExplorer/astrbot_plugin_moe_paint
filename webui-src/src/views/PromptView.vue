@@ -34,6 +34,9 @@ const PROMPT_KEYS = [
   "prompt.animal_categories",
   "prompt.person_closeup",
   "prompt.person_detail",
+  "prompt.persona_strip_photo",
+  "prompt.conflict_cleanup",
+  "prompt.soft_color",
 ];
 
 /** 画风硬锚定总开关（关掉则退回「可画类型只筛题材」的旧行为）。 */
@@ -343,6 +346,49 @@ onMounted(async () => {
             @update:value="(v: boolean) => set('prompt.person_detail', v)"
           />
           <span class="mp-sub">加 detailed face / eyes / skin，背景压简单</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- 冲突压缩 -->
+    <div class="mp-card">
+      <div class="mp-card-head">
+        <div class="mp-card-title">提示词冲突压缩</div>
+        <n-button size="small" type="primary" :loading="!!saving['提示词']" @click="save">保存本页</n-button>
+      </div>
+      <div class="mp-hint" style="margin-bottom: 10px">
+        LLM 很容易一句话里塞七个光：<code>rainy night</code> + <code>golden hour</code> +
+        <code>candlelight</code> + <code>neon lights</code> + <code>cinematic lighting</code>。
+        模型只能取平均，结果就是「颜色又艳又脏、对比拉满、像赛博朋克、一点都不柔和」。
+        这里按简报里定的那一项做减法，被删的标签会写进负向（只删不压制等于没删）。
+      </div>
+      <div class="mp-fields">
+        <label class="mp-field">
+          <span class="label">启用冲突压缩</span>
+          <n-switch
+            :value="cfgBool('prompt.conflict_cleanup', true)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.conflict_cleanup', v)"
+          />
+          <span class="mp-sub">光源/时段去重、背景互斥、取景互斥</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">柔和色彩</span>
+          <n-switch
+            :value="cfgBool('prompt.soft_color', false)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.soft_color', v)"
+          />
+          <span class="mp-sub">加 soft lighting / pastel colors，压 oversaturated</span>
+        </label>
+        <label class="mp-field">
+          <span class="label">人物锚定剔除摄影标签</span>
+          <n-switch
+            :value="cfgBool('prompt.persona_strip_photo', true)"
+            size="small"
+            @update:value="(v: boolean) => set('prompt.persona_strip_photo', v)"
+          />
+          <span class="mp-sub">去掉 asian / east asian，避免往写实与深肤色拉</span>
         </label>
       </div>
     </div>
